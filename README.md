@@ -2,6 +2,11 @@
 
 A Windows desktop app that generates production-ready DHIS2 Standard HTML reports from natural language descriptions, powered by Claude AI.
 
+> [!IMPORTANT]
+> **The app only loads metadata (indicators, data elements, org units) — not real data.**
+> All charts and tables inside the app display **fake/sample data** for layout preview purposes only.
+> **Real data is fetched and displayed only after the report is deployed to and opened inside DHIS2.**
+
 ## Features
 
 - **AI-powered report generation** — describe your report in Vietnamese or English; Claude writes the complete HTML/JS
