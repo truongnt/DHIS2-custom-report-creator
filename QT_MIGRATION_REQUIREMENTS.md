@@ -197,7 +197,7 @@ Checklist để verify từng chức năng sau khi migrate từ CustomTkinter sa
 | 16.3 | charts/ modules unchanged and working | ✅ |
 | 16.4 | config/ modules unchanged and working | ✅ |
 | 16.5 | ui/preview_server.py unchanged (HTTP server) | ✅ |
-| 16.6 | test_preview_app_sim.py still passes (chart rendering tests) | ⬜ |
+| 16.6 | test_preview_app_sim.py still passes (chart rendering tests) | ✅ |
 
 ## 17. Performance Improvements (Qt-specific gains)
 
