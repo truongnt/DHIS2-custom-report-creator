@@ -1,5 +1,5 @@
 """
-DashboardBuilderPanel — Superset-inspired dashboard assembler.
+DashboardBuilderPanel — Superset-inspired dashboard assembler (PySide6).
 
 Layout:
   ┌──────────────────────┬────────────────────────────────────────┐
@@ -24,219 +24,459 @@ Callbacks:
   on_switch_to_editor()   — request to switch back to Chart Editor tab
 """
 from __future__ import annotations
-import tkinter.messagebox as msgbox
-import customtkinter as ctk
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QColor
+from PySide6.QtWidgets import (
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QSplitter,
+    QFrame,
+    QLabel,
+    QPushButton,
+    QLineEdit,
+    QScrollArea,
+    QSizePolicy,
+    QMessageBox,
+    QSpacerItem,
+)
 
 DHIS2_BLUE = "#1a6fa8"
 PANEL_BG   = "#f7f9fc"
 BORDER_CLR = "#d0dde8"
+HEADER_BG  = "#e8eef5"
 
 
-class DashboardBuilderPanel(ctk.CTkFrame):
-    def __init__(self, master, callbacks: dict, **kw):
-        kw.setdefault("fg_color", PANEL_BG)
-        kw.setdefault("corner_radius", 0)
+def _h_line() -> QFrame:
+    """Thin horizontal separator."""
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setFrameShadow(QFrame.Shadow.Sunken)
+    line.setStyleSheet(f"color: {BORDER_CLR};")
+    return line
+
+
+class DashboardBuilderPanel(QWidget):
+    """PySide6 dashboard assembler panel."""
+
+    def __init__(self, master: QWidget, callbacks: dict, **kw):
         super().__init__(master, **kw)
-        self._callbacks = callbacks
+        self._callbacks: dict = callbacks
         self._cards: list[dict] = []
+        self._card_widgets: list[QFrame] = []   # parallel list to self._cards
         self._build()
         self.refresh_library()
 
     # ─── Build ───────────────────────────────────────────────────────────────
 
     def _build(self):
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=0, minsize=240)
-        self.grid_columnconfigure(1, weight=1)
+        self.setStyleSheet(f"background-color: {PANEL_BG};")
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        # Divider between library and canvas
-        ctk.CTkFrame(self, width=1, fg_color=BORDER_CLR,
-                     corner_radius=0).grid(row=0, column=0, sticky="nse")
+        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter.setHandleWidth(1)
+        splitter.setStyleSheet(
+            f"QSplitter::handle {{ background-color: {BORDER_CLR}; }}"
+        )
+        root_layout.addWidget(splitter)
 
-        self._build_library()
-        self._build_canvas()
+        left_widget = QWidget()
+        left_widget.setFixedWidth(240)
+        left_widget.setStyleSheet(f"background-color: {PANEL_BG};")
+        splitter.addWidget(left_widget)
+
+        right_widget = QWidget()
+        right_widget.setStyleSheet(f"background-color: {PANEL_BG};")
+        splitter.addWidget(right_widget)
+
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+
+        self._build_library(left_widget)
+        self._build_canvas(right_widget)
 
     # ── Left: Chart Library ───────────────────────────────────────────────
 
-    def _build_library(self):
-        lib = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=0)
-        lib.grid(row=0, column=0, sticky="nsew")
-        lib.grid_rowconfigure(1, weight=1)
-        lib.grid_columnconfigure(0, weight=1)
+    def _build_library(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Header
-        hdr = ctk.CTkFrame(lib, fg_color="#e8eef5", corner_radius=0, height=36)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_propagate(False)
-        hdr.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(hdr, text="Chart Library",
-                     font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="#3a5068").grid(
-            row=0, column=0, padx=14, pady=6, sticky="w")
+        hdr = QFrame()
+        hdr.setFixedHeight(36)
+        hdr.setStyleSheet(f"background-color: {HEADER_BG}; border: none;")
+        hdr_layout = QHBoxLayout(hdr)
+        hdr_layout.setContentsMargins(14, 0, 14, 0)
+        lbl = QLabel("Chart Library")
+        lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        lbl.setStyleSheet("color: #3a5068;")
+        hdr_layout.addWidget(lbl)
+        layout.addWidget(hdr)
 
         # Scrollable chart list
-        self._lib_scroll = ctk.CTkScrollableFrame(
-            lib, fg_color=PANEL_BG, corner_radius=0,
-            scrollbar_button_color="#c0cdd8")
-        self._lib_scroll.grid(row=1, column=0, sticky="nsew")
-        self._lib_scroll.grid_columnconfigure(0, weight=1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ background-color: {PANEL_BG}; border: none; }}"
+        )
 
-        self._lib_empty_lbl = ctk.CTkLabel(
-            self._lib_scroll,
-            text="No saved charts yet.\nBuild a chart and click\n'Save to Library'.",
-            font=ctk.CTkFont(size=11), text_color="#8aa3b8", justify="center")
-        self._lib_empty_lbl.grid(row=0, column=0, pady=24)
+        self._lib_container = QWidget()
+        self._lib_container.setStyleSheet(f"background-color: {PANEL_BG};")
+        self._lib_layout = QVBoxLayout(self._lib_container)
+        self._lib_layout.setContentsMargins(0, 4, 0, 4)
+        self._lib_layout.setSpacing(0)
+        self._lib_layout.addStretch(1)   # sentinel stretch at bottom
 
-        # Footer: refresh + go to editor
-        footer = ctk.CTkFrame(lib, fg_color="#e8eef5", corner_radius=0, height=40)
-        footer.grid(row=2, column=0, sticky="ew")
-        footer.grid_propagate(False)
-        ctk.CTkButton(
-            footer, text="↺ Refresh", height=26, width=90,
-            fg_color="transparent", border_width=1, border_color="#c0cdd8",
-            text_color="#5a7a9a", hover_color="#d8e4f0",
-            font=ctk.CTkFont(size=11),
-            command=self.refresh_library).pack(side="left", padx=8, pady=7)
-        ctk.CTkButton(
-            footer, text="← Chart Editor", height=26,
-            fg_color="transparent", border_width=1, border_color=DHIS2_BLUE,
-            text_color=DHIS2_BLUE, hover_color="#e8f0f8",
-            font=ctk.CTkFont(size=11),
-            command=lambda: self._callbacks.get("on_switch_to_editor", lambda: None)()
-        ).pack(side="right", padx=8, pady=7)
+        scroll.setWidget(self._lib_container)
+        layout.addWidget(scroll, 1)
+
+        # Footer
+        footer = QFrame()
+        footer.setFixedHeight(40)
+        footer.setStyleSheet(f"background-color: {HEADER_BG}; border: none;")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(8, 0, 8, 0)
+        footer_layout.setSpacing(6)
+
+        refresh_btn = QPushButton("↺ Refresh")
+        refresh_btn.setFixedHeight(26)
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: transparent;"
+            f" border: 1px solid #c0cdd8;"
+            "  border-radius: 4px;"
+            "  color: #5a7a9a;"
+            "  font-size: 11px;"
+            "  padding: 0 10px;"
+            "}"
+            "QPushButton:hover { background-color: #d8e4f0; }"
+        )
+        refresh_btn.clicked.connect(self.refresh_library)
+
+        editor_btn = QPushButton("← Chart Editor")
+        editor_btn.setFixedHeight(26)
+        editor_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        editor_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: transparent;"
+            f" border: 1px solid {DHIS2_BLUE};"
+            "  border-radius: 4px;"
+            f" color: {DHIS2_BLUE};"
+            "  font-size: 11px;"
+            "  padding: 0 10px;"
+            "}"
+            "QPushButton:hover { background-color: #e8f0f8; }"
+        )
+        editor_btn.clicked.connect(
+            lambda: self._callbacks.get("on_switch_to_editor", lambda: None)()
+        )
+
+        footer_layout.addWidget(refresh_btn)
+        footer_layout.addStretch(1)
+        footer_layout.addWidget(editor_btn)
+        layout.addWidget(footer)
 
     # ── Right: Dashboard Canvas ───────────────────────────────────────────
 
-    def _build_canvas(self):
-        canvas = ctk.CTkFrame(self, fg_color=PANEL_BG, corner_radius=0)
-        canvas.grid(row=0, column=1, sticky="nsew")
-        canvas.grid_rowconfigure(1, weight=1)
-        canvas.grid_columnconfigure(0, weight=1)
+    def _build_canvas(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Header
-        hdr = ctk.CTkFrame(canvas, fg_color="#e8eef5", corner_radius=0, height=36)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_propagate(False)
-        hdr.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(hdr, text="Dashboard Canvas",
-                     font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="#3a5068").grid(
-            row=0, column=0, padx=14, pady=6, sticky="w")
-        self._card_count_lbl = ctk.CTkLabel(
-            hdr, text="0 charts",
-            font=ctk.CTkFont(size=10), text_color="#8aa3b8")
-        self._card_count_lbl.grid(row=0, column=1, padx=14, pady=6, sticky="e")
+        hdr = QFrame()
+        hdr.setFixedHeight(36)
+        hdr.setStyleSheet(f"background-color: {HEADER_BG}; border: none;")
+        hdr_layout = QHBoxLayout(hdr)
+        hdr_layout.setContentsMargins(14, 0, 14, 0)
 
-        # Card scroll area
-        self._card_scroll = ctk.CTkScrollableFrame(
-            canvas, fg_color=PANEL_BG, corner_radius=0,
-            scrollbar_button_color="#c0cdd8")
-        self._card_scroll.grid(row=1, column=0, sticky="nsew")
-        self._card_scroll.grid_columnconfigure(0, weight=1)
+        canvas_lbl = QLabel("Dashboard Canvas")
+        canvas_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        canvas_lbl.setStyleSheet("color: #3a5068;")
+        hdr_layout.addWidget(canvas_lbl)
 
-        self._no_cards_lbl = ctk.CTkLabel(
-            self._card_scroll,
-            text="No charts yet.\nAdd charts from the library\nor use Chart Editor.",
-            font=ctk.CTkFont(size=12), text_color="#8aa3b8", justify="center")
-        self._no_cards_lbl.grid(row=0, column=0, pady=32)
+        hdr_layout.addStretch(1)
 
-        # Bottom: report name + actions
-        bottom = ctk.CTkFrame(canvas, fg_color="#e8eef5", corner_radius=0)
-        bottom.grid(row=2, column=0, sticky="ew")
-        bottom.grid_columnconfigure(0, weight=1)
+        self._card_count_lbl = QLabel("0 charts")
+        self._card_count_lbl.setFont(QFont("Segoe UI", 9))
+        self._card_count_lbl.setStyleSheet("color: #8aa3b8;")
+        hdr_layout.addWidget(self._card_count_lbl)
+        layout.addWidget(hdr)
 
-        rn_row = ctk.CTkFrame(bottom, fg_color="transparent")
-        rn_row.grid(row=0, column=0, padx=12, pady=(6, 2), sticky="ew")
-        rn_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(rn_row, text="Report name:",
-                     font=ctk.CTkFont(size=10), text_color="#5a7a9a",
-                     width=95).grid(row=0, column=0, sticky="w")
-        self._report_name_entry = ctk.CTkEntry(
-            rn_row, height=26, font=ctk.CTkFont(size=11),
-            placeholder_text="My Dashboard")
-        self._report_name_entry.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        # Scrollable card list
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ background-color: {PANEL_BG}; border: none; }}"
+        )
 
-        ab = ctk.CTkFrame(bottom, fg_color="transparent")
-        ab.grid(row=1, column=0, padx=12, pady=(2, 8), sticky="ew")
-        ab.grid_columnconfigure(0, weight=1)
-        ab.grid_columnconfigure(1, weight=1)
+        self._canvas_container = QWidget()
+        self._canvas_container.setStyleSheet(f"background-color: {PANEL_BG};")
+        self._canvas_layout = QVBoxLayout(self._canvas_container)
+        self._canvas_layout.setContentsMargins(6, 4, 6, 4)
+        self._canvas_layout.setSpacing(0)
 
-        self._export_btn = ctk.CTkButton(
-            ab, text="⬇ Export HTML", height=34,
-            fg_color="#2980b9", hover_color="#1e6b99",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            command=self._on_export, state="disabled")
-        self._export_btn.grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        self._no_cards_lbl = QLabel(
+            "No charts yet.\nAdd charts from the library\nor use Chart Editor."
+        )
+        self._no_cards_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._no_cards_lbl.setFont(QFont("Segoe UI", 10))
+        self._no_cards_lbl.setStyleSheet(
+            f"color: #8aa3b8; background-color: {PANEL_BG}; padding: 32px;"
+        )
+        self._canvas_layout.addWidget(self._no_cards_lbl)
+        self._canvas_layout.addStretch(1)
 
-        self._deploy_btn = ctk.CTkButton(
-            ab, text="🚀 Deploy to DHIS2", height=34,
-            fg_color="#27ae60", hover_color="#1e8449",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            command=self._on_deploy, state="disabled")
-        self._deploy_btn.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        scroll.setWidget(self._canvas_container)
+        layout.addWidget(scroll, 1)
 
-        # Clear button
-        ctk.CTkButton(
-            bottom, text="🗑 Clear all", height=24,
-            fg_color="transparent", border_width=1, border_color="#e74c3c",
-            text_color="#e74c3c", hover_color="#fdecea",
-            font=ctk.CTkFont(size=10),
-            command=self._on_clear_all).grid(
-            row=2, column=0, padx=12, pady=(0, 6), sticky="e")
+        # Bottom panel
+        bottom = QFrame()
+        bottom.setStyleSheet(f"background-color: {HEADER_BG}; border: none;")
+        bottom_layout = QVBoxLayout(bottom)
+        bottom_layout.setContentsMargins(12, 6, 12, 8)
+        bottom_layout.setSpacing(6)
+
+        # Report name row
+        rn_row = QWidget()
+        rn_row.setStyleSheet("background-color: transparent;")
+        rn_layout = QHBoxLayout(rn_row)
+        rn_layout.setContentsMargins(0, 0, 0, 0)
+        rn_layout.setSpacing(6)
+
+        rn_lbl = QLabel("Report name:")
+        rn_lbl.setFont(QFont("Segoe UI", 9))
+        rn_lbl.setStyleSheet("color: #5a7a9a; background-color: transparent;")
+        rn_lbl.setFixedWidth(85)
+        rn_layout.addWidget(rn_lbl)
+
+        self._report_name_entry = QLineEdit()
+        self._report_name_entry.setPlaceholderText("My Dashboard")
+        self._report_name_entry.setFixedHeight(26)
+        self._report_name_entry.setFont(QFont("Segoe UI", 10))
+        self._report_name_entry.setStyleSheet(
+            "QLineEdit {"
+            "  border: 1px solid #c0cdd8;"
+            "  border-radius: 4px;"
+            "  padding: 0 6px;"
+            "  background-color: white;"
+            "  color: #1e2d3d;"
+            "}"
+            "QLineEdit:focus { border-color: #1a6fa8; }"
+        )
+        rn_layout.addWidget(self._report_name_entry, 1)
+        bottom_layout.addWidget(rn_row)
+
+        # Export / Deploy row
+        action_row = QWidget()
+        action_row.setStyleSheet("background-color: transparent;")
+        action_layout = QHBoxLayout(action_row)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        action_layout.setSpacing(6)
+
+        self._export_btn = QPushButton("⬇ Export HTML")
+        self._export_btn.setFixedHeight(34)
+        self._export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._export_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._export_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #2980b9;"
+            "  border: none;"
+            "  border-radius: 5px;"
+            "  color: white;"
+            "  padding: 0 14px;"
+            "}"
+            "QPushButton:hover { background-color: #1e6b99; }"
+            "QPushButton:disabled { background-color: #a8c8e8; color: #e0eaf4; }"
+        )
+        self._export_btn.setEnabled(False)
+        self._export_btn.clicked.connect(self._on_export)
+        action_layout.addWidget(self._export_btn, 1)
+
+        self._deploy_btn = QPushButton("🚀 Deploy to DHIS2")
+        self._deploy_btn.setFixedHeight(34)
+        self._deploy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._deploy_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._deploy_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #27ae60;"
+            "  border: none;"
+            "  border-radius: 5px;"
+            "  color: white;"
+            "  padding: 0 14px;"
+            "}"
+            "QPushButton:hover { background-color: #1e8449; }"
+            "QPushButton:disabled { background-color: #a8d8bc; color: #e0f4ea; }"
+        )
+        self._deploy_btn.setEnabled(False)
+        self._deploy_btn.clicked.connect(self._on_deploy)
+        action_layout.addWidget(self._deploy_btn, 1)
+
+        bottom_layout.addWidget(action_row)
+
+        # Clear all row (right-aligned)
+        clear_row = QWidget()
+        clear_row.setStyleSheet("background-color: transparent;")
+        clear_layout = QHBoxLayout(clear_row)
+        clear_layout.setContentsMargins(0, 0, 0, 0)
+        clear_layout.addStretch(1)
+
+        clear_btn = QPushButton("🗑 Clear all")
+        clear_btn.setFixedHeight(24)
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.setFont(QFont("Segoe UI", 9))
+        clear_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  border: 1px solid #e74c3c;"
+            "  border-radius: 4px;"
+            "  color: #e74c3c;"
+            "  padding: 0 10px;"
+            "}"
+            "QPushButton:hover { background-color: #fdecea; }"
+        )
+        clear_btn.clicked.connect(self._on_clear_all)
+        clear_layout.addWidget(clear_btn)
+
+        bottom_layout.addWidget(clear_row)
+        layout.addWidget(bottom)
 
     # ─── Library ─────────────────────────────────────────────────────────────
 
     def refresh_library(self):
+        """Clear and rebuild the library scroll from chart_library.load_charts()."""
         from config.chart_library import load_charts
-        for w in self._lib_scroll.winfo_children():
-            w.destroy()
+
+        # Remove all widgets except the trailing stretch
+        while self._lib_layout.count() > 1:
+            item = self._lib_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
         charts = load_charts()
         if not charts:
-            self._lib_empty_lbl = ctk.CTkLabel(
-                self._lib_scroll,
-                text="No saved charts yet.\nBuild a chart and click\n'Save to Library'.",
-                font=ctk.CTkFont(size=11), text_color="#8aa3b8", justify="center")
-            self._lib_empty_lbl.grid(row=0, column=0, pady=24)
+            empty_lbl = QLabel(
+                "No saved charts yet.\nBuild a chart and click\n'Save to Library'."
+            )
+            empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_lbl.setFont(QFont("Segoe UI", 9))
+            empty_lbl.setStyleSheet(
+                f"color: #8aa3b8; background-color: {PANEL_BG}; padding: 24px 8px;"
+            )
+            self._lib_layout.insertWidget(0, empty_lbl)
             return
-        for i, chart in enumerate(charts):
-            self._build_library_card(i, chart)
 
-    def _build_library_card(self, row: int, chart: dict):
-        rf = ctk.CTkFrame(self._lib_scroll, fg_color="white",
-                           border_color=BORDER_CLR, border_width=1, corner_radius=6)
-        rf.grid(row=row, column=0, padx=6, pady=3, sticky="ew")
-        rf.grid_columnconfigure(0, weight=1)
+        for i, chart in enumerate(charts):
+            card = self._make_library_card(chart)
+            self._lib_layout.insertWidget(i, card)
+
+    def _make_library_card(self, chart: dict) -> QFrame:
+        """Return a QFrame representing one chart in the library list."""
+        rf = QFrame()
+        rf.setStyleSheet(
+            "QFrame {"
+            "  background-color: white;"
+            f" border: 1px solid {BORDER_CLR};"
+            "  border-radius: 6px;"
+            "}"
+        )
+        rf.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+
+        row_layout = QHBoxLayout(rf)
+        row_layout.setContentsMargins(8, 5, 6, 5)
+        row_layout.setSpacing(4)
+
+        # Text block
+        text_widget = QWidget()
+        text_widget.setStyleSheet("border: none; background-color: transparent;")
+        text_layout = QVBoxLayout(text_widget)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(1)
+
+        name_lbl = QLabel(chart.get("name") or chart.get("title", "?"))
+        name_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        name_lbl.setStyleSheet("color: #1e2d3d; border: none;")
+        text_layout.addWidget(name_lbl)
 
         tmpl_label = chart.get("template_label", chart.get("template_id", "?"))
-        ctk.CTkLabel(rf,
-                     text=chart.get("name") or chart.get("title", "?"),
-                     font=ctk.CTkFont(size=11, weight="bold"),
-                     text_color="#1e2d3d", anchor="w"
-                     ).grid(row=0, column=0, padx=8, pady=(5, 1), sticky="w")
-        ctk.CTkLabel(rf,
-                     text=tmpl_label,
-                     font=ctk.CTkFont(size=9), text_color="#8aa3b8", anchor="w"
-                     ).grid(row=1, column=0, padx=8, pady=(0, 5), sticky="w")
+        tmpl_lbl = QLabel(tmpl_label)
+        tmpl_lbl.setFont(QFont("Segoe UI", 8))
+        tmpl_lbl.setStyleSheet("color: #8aa3b8; border: none;")
+        text_layout.addWidget(tmpl_lbl)
 
-        btn_col = ctk.CTkFrame(rf, fg_color="transparent")
-        btn_col.grid(row=0, column=1, rowspan=2, padx=6, pady=4)
-        ctk.CTkButton(
-            btn_col, text="+ Add", width=52, height=26,
-            fg_color=DHIS2_BLUE, hover_color="#155a8a",
-            font=ctk.CTkFont(size=10),
-            command=lambda c=chart: self.add_card(c)
-        ).pack(pady=(0, 2))
-        ctk.CTkButton(
-            btn_col, text="✕", width=52, height=22,
-            fg_color="transparent", hover_color="#f5c6cb",
-            text_color="#c0392b", border_width=1, border_color="#e0b0b0",
-            font=ctk.CTkFont(size=9),
-            command=lambda c=chart: self._delete_library_chart(c)
-        ).pack()
+        row_layout.addWidget(text_widget, 1)
+
+        # Button column
+        btn_col = QWidget()
+        btn_col.setStyleSheet("border: none; background-color: transparent;")
+        btn_layout = QVBoxLayout(btn_col)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(2)
+
+        add_btn = QPushButton("+ Add")
+        add_btn.setFixedSize(52, 26)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setFont(QFont("Segoe UI", 9))
+        add_btn.setStyleSheet(
+            "QPushButton {"
+            f" background-color: {DHIS2_BLUE};"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "  color: white;"
+            "}"
+            "QPushButton:hover { background-color: #155a8a; }"
+        )
+        add_btn.clicked.connect(lambda checked=False, c=chart: self.add_card(c))
+        btn_layout.addWidget(add_btn)
+
+        del_btn = QPushButton("✕")
+        del_btn.setFixedSize(52, 22)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.setFont(QFont("Segoe UI", 9))
+        del_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  border: 1px solid #e0b0b0;"
+            "  border-radius: 4px;"
+            "  color: #c0392b;"
+            "}"
+            "QPushButton:hover { background-color: #f5c6cb; }"
+        )
+        del_btn.clicked.connect(
+            lambda checked=False, c=chart: self._delete_library_chart(c)
+        )
+        btn_layout.addWidget(del_btn)
+
+        row_layout.addWidget(btn_col)
+
+        # Outer wrapper with margins
+        wrapper = QFrame()
+        wrapper.setStyleSheet("background-color: transparent; border: none;")
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(6, 3, 6, 3)
+        wrapper_layout.setSpacing(0)
+        wrapper_layout.addWidget(rf)
+        return wrapper
 
     def _delete_library_chart(self, chart: dict):
-        if msgbox.askyesno("Delete Chart",
-                           f"Delete '{chart.get('name', chart.get('title'))}' from library?"):
+        name = chart.get("name") or chart.get("title", "")
+        reply = QMessageBox.question(
+            self,
+            "Delete Chart",
+            f"Delete '{name}' from library?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
             from config.chart_library import delete_chart
             delete_chart(chart["id"])
             self.refresh_library()
@@ -244,73 +484,140 @@ class DashboardBuilderPanel(ctk.CTkFrame):
     # ─── Dashboard Canvas ─────────────────────────────────────────────────────
 
     def add_card(self, cfg: dict):
-        if hasattr(self, "_no_cards_lbl") and self._no_cards_lbl.winfo_exists():
-            self._no_cards_lbl.grid_remove()
-        self._cards.append(cfg)
-        idx = len(self._cards) - 1
-        rf = ctk.CTkFrame(self._card_scroll, fg_color="white",
-                           border_color=BORDER_CLR, border_width=1, corner_radius=6)
-        rf.grid(row=idx, column=0, padx=6, pady=3, sticky="ew")
-        rf.grid_columnconfigure(0, weight=1)
+        """Add cfg to the dashboard canvas."""
+        # Hide empty-state label on first card
+        if self._no_cards_lbl is not None and self._no_cards_lbl.isVisible():
+            self._no_cards_lbl.hide()
 
-        color_dot = "●"
+        self._cards.append(cfg)
+        card_widget = self._make_canvas_card(cfg, len(self._cards) - 1)
+        # Insert before the trailing stretch
+        stretch_idx = self._canvas_layout.count() - 1
+        self._canvas_layout.insertWidget(stretch_idx, card_widget)
+        self._card_widgets.append(card_widget)
+
+        self._export_btn.setEnabled(True)
+        self._deploy_btn.setEnabled(True)
+        self._update_count()
+
+    def _make_canvas_card(self, cfg: dict, idx: int) -> QFrame:
+        """Return a QFrame representing one card on the dashboard canvas."""
         chart_color = cfg.get("chart_color", "#3498db")
         name = cfg.get("name") or cfg.get("title", "?")
         mode_lbl = "AI" if cfg.get("mode") == "ai" else "Fixed"
         src_n = len(cfg.get("de_sources", [])) or 1
+        col_w = cfg.get("col_width", 6)
+        tmpl  = cfg.get("template_label", "")
 
-        ctk.CTkLabel(rf,
-                     text=f"{color_dot}  {name}",
-                     font=ctk.CTkFont(size=11, weight="bold"),
-                     text_color=chart_color, anchor="w"
-                     ).grid(row=0, column=0, padx=8, pady=(5, 1), sticky="w")
-        ctk.CTkLabel(rf,
-                     text=f"{cfg.get('template_label', '')}  •  col-{cfg.get('col_width', 6)}  •  {src_n} src  •  {mode_lbl}",
-                     font=ctk.CTkFont(size=9), text_color="#8aa3b8", anchor="w"
-                     ).grid(row=1, column=0, padx=8, pady=(0, 5), sticky="w")
-        ctk.CTkButton(rf, text="✕", width=24, height=24,
-                      fg_color="#f0f4f8", hover_color="#f5c6cb",
-                      text_color="#c0392b", font=ctk.CTkFont(size=10),
-                      command=lambda i=idx, f=rf: self._remove_card(i, f)
-                      ).grid(row=0, column=1, rowspan=2, padx=6)
+        outer = QFrame()
+        outer.setStyleSheet("background-color: transparent; border: none;")
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(0, 3, 0, 3)
+        outer_layout.setSpacing(0)
 
-        self._export_btn.configure(state="normal")
-        self._deploy_btn.configure(state="normal")
-        count = len(self._cards)
-        self._card_count_lbl.configure(
-            text=f"{count} chart{'s' if count != 1 else ''}")
+        rf = QFrame()
+        rf.setStyleSheet(
+            "QFrame {"
+            "  background-color: white;"
+            f" border: 1px solid {BORDER_CLR};"
+            "  border-radius: 6px;"
+            "}"
+        )
+        rf.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    def _remove_card(self, idx: int, frame):
-        if 0 <= idx < len(self._cards):
-            self._cards[idx] = None
-        frame.destroy()
-        self._cards = [c for c in self._cards if c is not None]
-        count = len(self._cards)
-        self._card_count_lbl.configure(
-            text=f"{count} chart{'s' if count != 1 else ''}")
+        row_layout = QHBoxLayout(rf)
+        row_layout.setContentsMargins(8, 5, 6, 5)
+        row_layout.setSpacing(4)
+
+        # Text block
+        text_widget = QWidget()
+        text_widget.setStyleSheet("border: none; background-color: transparent;")
+        text_layout = QVBoxLayout(text_widget)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+
+        name_lbl = QLabel(f"●  {name}")
+        name_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        name_lbl.setStyleSheet(f"color: {chart_color}; border: none;")
+        text_layout.addWidget(name_lbl)
+
+        meta_lbl = QLabel(f"{tmpl}  •  col-{col_w}  •  {src_n} src  •  {mode_lbl}")
+        meta_lbl.setFont(QFont("Segoe UI", 8))
+        meta_lbl.setStyleSheet("color: #8aa3b8; border: none;")
+        text_layout.addWidget(meta_lbl)
+
+        row_layout.addWidget(text_widget, 1)
+
+        # Remove button — captures outer frame reference for deletion
+        rm_btn = QPushButton("✕")
+        rm_btn.setFixedSize(24, 24)
+        rm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        rm_btn.setFont(QFont("Segoe UI", 10))
+        rm_btn.setStyleSheet(
+            "QPushButton {"
+            "  background-color: #f0f4f8;"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "  color: #c0392b;"
+            "}"
+            "QPushButton:hover { background-color: #f5c6cb; }"
+        )
+        rm_btn.clicked.connect(
+            lambda checked=False, w=outer: self._remove_card(w)
+        )
+        row_layout.addWidget(rm_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        outer_layout.addWidget(rf)
+        return outer
+
+    def _remove_card(self, widget: QFrame):
+        """Remove widget from canvas and corresponding entry from self._cards."""
+        if widget in self._card_widgets:
+            idx = self._card_widgets.index(widget)
+            self._card_widgets.pop(idx)
+            if 0 <= idx < len(self._cards):
+                self._cards.pop(idx)
+
+        widget.hide()
+        self._canvas_layout.removeWidget(widget)
+        widget.deleteLater()
+
+        self._update_count()
         if not self._cards:
-            self._no_cards_lbl = ctk.CTkLabel(
-                self._card_scroll,
-                text="No charts yet.\nAdd charts from the library\nor use Chart Editor.",
-                font=ctk.CTkFont(size=12), text_color="#8aa3b8", justify="center")
-            self._no_cards_lbl.grid(row=0, column=0, pady=32)
-            self._export_btn.configure(state="disabled")
-            self._deploy_btn.configure(state="disabled")
+            self._no_cards_lbl.show()
+            self._export_btn.setEnabled(False)
+            self._deploy_btn.setEnabled(False)
 
     def _on_clear_all(self):
-        if self._cards and msgbox.askyesno("Clear Dashboard",
-                                           "Remove all charts from this dashboard?"):
-            for w in self._card_scroll.winfo_children():
-                w.destroy()
-            self._cards = []
-            self._card_count_lbl.configure(text="0 charts")
-            self._no_cards_lbl = ctk.CTkLabel(
-                self._card_scroll,
-                text="No charts yet.\nAdd charts from the library\nor use Chart Editor.",
-                font=ctk.CTkFont(size=12), text_color="#8aa3b8", justify="center")
-            self._no_cards_lbl.grid(row=0, column=0, pady=32)
-            self._export_btn.configure(state="disabled")
-            self._deploy_btn.configure(state="disabled")
+        if not self._cards:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Clear Dashboard",
+            "Remove all charts from this dashboard?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        for w in list(self._card_widgets):
+            w.hide()
+            self._canvas_layout.removeWidget(w)
+            w.deleteLater()
+
+        self._cards.clear()
+        self._card_widgets.clear()
+        self._update_count()
+        self._no_cards_lbl.show()
+        self._export_btn.setEnabled(False)
+        self._deploy_btn.setEnabled(False)
+
+    def _update_count(self):
+        count = len(self._cards)
+        self._card_count_lbl.setText(
+            f"{count} chart{'s' if count != 1 else ''}"
+        )
 
     # ─── Export / Deploy ──────────────────────────────────────────────────────
 
@@ -320,14 +627,17 @@ class DashboardBuilderPanel(ctk.CTkFrame):
             cb(list(self._cards))
 
     def _on_deploy(self):
-        name = self._report_name_entry.get().strip()
+        name = self._report_name_entry.text().strip()
         if not name:
-            msgbox.showwarning("Deploy", "Enter a report name first.")
-            self._report_name_entry.focus()
+            QMessageBox.warning(self, "Deploy", "Enter a report name first.")
+            self._report_name_entry.setFocus()
             return
         cb = self._callbacks.get("on_deploy")
         if cb:
             cb(name, list(self._cards))
 
+    # ─── Public API ──────────────────────────────────────────────────────────
+
     def get_cards(self) -> list[dict]:
+        """Return a copy of the current dashboard card list."""
         return list(self._cards)

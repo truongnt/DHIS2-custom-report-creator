@@ -1,9 +1,16 @@
 import copy
-import customtkinter as ctk
-import tkinter.messagebox as msgbox
 import threading
 import os
 from dotenv import load_dotenv
+
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+    QFrame, QLabel, QPushButton, QStackedWidget,
+    QScrollArea, QLineEdit, QComboBox, QProgressBar,
+    QMessageBox, QSizePolicy, QStatusBar, QSpacerItem,
+)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont
 
 from ui.chart_editor_panel import ChartEditorPanel
 from ui.dashboard_builder_panel import DashboardBuilderPanel
@@ -27,6 +34,7 @@ def _merge_pinned(layout: list[dict] | None,
                 if uid not in merged[key]:
                     merged[key].append(uid)
     return merged
+
 
 def _detect_changed_cards(old_layout: list[dict], new_layout: list[dict]) -> set[str]:
     """Return IDs of cards whose template_id, title, or pinned UIDs changed."""
@@ -56,12 +64,64 @@ SIDEBAR_BG = "#1e2d3d"
 SIDEBAR_FG = "#ffffff"
 
 
-class AppWindow(ctk.CTk):
+# ── Helpers ─────────────────────────────────────────────────────────────────
+
+def _make_sidebar_button(text: str, parent: QWidget) -> QPushButton:
+    btn = QPushButton(text, parent)
+    btn.setFixedHeight(42)
+    btn.setCheckable(False)
+    btn.setStyleSheet(
+        "QPushButton {"
+        "  background: transparent;"
+        "  border: none;"
+        "  color: #8aa3b8;"
+        "  font-size: 12px;"
+        "  text-align: left;"
+        "  padding-left: 12px;"
+        "  border-radius: 6px;"
+        "}"
+        "QPushButton:hover { background: #253d52; }"
+        "QPushButton:disabled { color: #445566; }"
+    )
+    return btn
+
+
+def _active_sidebar_button_style() -> str:
+    return (
+        "QPushButton {"
+        f"  background: {DHIS2_BLUE};"
+        "  border: none;"
+        "  color: white;"
+        "  font-size: 12px;"
+        "  text-align: left;"
+        "  padding-left: 12px;"
+        "  border-radius: 6px;"
+        "}"
+        f"QPushButton:hover {{ background: #155a8a; }}"
+    )
+
+
+def _inactive_sidebar_button_style() -> str:
+    return (
+        "QPushButton {"
+        "  background: transparent;"
+        "  border: none;"
+        "  color: #8aa3b8;"
+        "  font-size: 12px;"
+        "  text-align: left;"
+        "  padding-left: 12px;"
+        "  border-radius: 6px;"
+        "}"
+        "QPushButton:hover { background: #253d52; }"
+        "QPushButton:disabled { color: #445566; }"
+    )
+
+
+class AppWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("DHIS2 Auto Report")
-        self.after(0, lambda: self.state("zoomed"))  # maximize on startup
-        self.minsize(1024, 640)
+        self.setWindowTitle("DHIS2 Auto Report")
+        self.setMinimumSize(1024, 640)
 
         self._client           = None   # DHIS2Client once connected
         self._metadata         = None   # loaded metadata dict
@@ -80,9 +140,21 @@ class AppWindow(ctk.CTk):
         self._api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         self._profiles: list[dict] = []   # loaded from credentials store
 
+        # Stub attributes to prevent AttributeError from legacy callback chain
+        self.generate_btn    = None   # no dedicated generate button in new layout
+        self.report_view     = _ReportViewStub()
+        self.chat_panel      = _ChatPanelStub()
+        self.quick_form      = _QuickFormStub()
+        self.tabs            = _TabsStub()
+
         self._build_layout()
         self._lock_ui()          # locked until DHIS2 connect succeeds
         self._load_saved_credentials()
+
+        # Maximize after event loop starts
+        QTimer.singleShot(0, self.showMaximized)
+
+    # ─── Lock / Unlock ────────────────────────────────────────────────────────
 
     def _lock_ui(self):
         """No-op — nav buttons handle access control."""
@@ -92,7 +164,7 @@ class AppWindow(ctk.CTk):
         """Enable Chart Editor and Dashboard nav buttons after connect."""
         for key in ("chart_editor", "dashboard"):
             if key in self._nav_btns:
-                self._nav_btns[key].configure(state="normal")
+                self._nav_btns[key].setEnabled(True)
 
     def _invalidate_ctx_caches(self):
         """Clear cached contexts — call when metadata or pinned items change."""
@@ -103,331 +175,438 @@ class AppWindow(ctk.CTk):
     # ─── Layout ──────────────────────────────────────────────────────────────
 
     def _build_layout(self):
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
         self._active_panel: str = "config"
-        self._build_navbar()
-        self._build_content()
 
-    # ─── Left navigation bar ─────────────────────────────────────────────────
+        central = QWidget()
+        self.setCentralWidget(central)
 
-    def _build_navbar(self):
-        nav = ctk.CTkFrame(self, width=160, corner_radius=0, fg_color=SIDEBAR_BG)
-        nav.grid(row=0, column=0, sticky="nsew")
-        nav.grid_propagate(False)
-        nav.grid_columnconfigure(0, weight=1)
-        nav.grid_rowconfigure(10, weight=1)   # spacer pushes footer down
-        self._navbar = nav
+        root_layout = QHBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        # Left sidebar
+        self._sidebar = self._build_sidebar(central)
+        self._sidebar.setFixedWidth(160)
+        root_layout.addWidget(self._sidebar)
+
+        # Right content area (stacked panels)
+        self._content = QStackedWidget(central)
+        self._content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root_layout.addWidget(self._content)
+
+        self._build_panels()
+        self._build_statusbar()
+
+        # Show default panel
+        self._show_panel("config")
+
+    # ─── Left navigation sidebar ──────────────────────────────────────────────
+
+    def _build_sidebar(self, parent: QWidget) -> QFrame:
+        sidebar = QFrame(parent)
+        sidebar.setObjectName("sidebar")
+        sidebar.setStyleSheet(f"QFrame#sidebar {{ background-color: {SIDEBAR_BG}; border: none; }}")
+
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(8, 16, 8, 12)
+        layout.setSpacing(0)
 
         # App title
-        ctk.CTkLabel(nav, text="DHIS2\nAuto Report",
-                     font=ctk.CTkFont(size=13, weight="bold"),
-                     text_color=SIDEBAR_FG, justify="center").grid(
-            row=0, column=0, padx=12, pady=(16, 10), sticky="ew")
+        title_lbl = QLabel("DHIS2\nAuto Report", sidebar)
+        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_lbl.setStyleSheet(
+            "color: white; font-size: 13px; font-weight: bold;"
+            "padding: 0 4px 10px 4px; background: transparent;"
+        )
+        layout.addWidget(title_lbl)
 
-        ctk.CTkFrame(nav, height=1, fg_color="#2a4a6a").grid(
-            row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+        # Divider
+        div = QFrame(sidebar)
+        div.setFrameShape(QFrame.Shape.HLine)
+        div.setStyleSheet(f"color: #2a4a6a; background-color: #2a4a6a; border: none; max-height: 1px;")
+        div.setFixedHeight(1)
+        layout.addWidget(div)
+        layout.addSpacing(6)
 
-        # Nav items
+        # Nav buttons
         NAV_ITEMS = [
-            ("config",       "⚙",  "Login & Config"),
-            ("chart_editor", "📊", "Viz Builder"),
-            ("dashboard",    "🗂", "Dashboard"),
+            ("config",       "  ⚙  Login & Config"),
+            ("chart_editor", "  \U0001f4ca  Viz Builder"),
+            ("dashboard",    "  \U0001f5c2  Dashboard"),
         ]
-        self._nav_btns: dict[str, ctk.CTkButton] = {}
-        for i, (key, icon, label) in enumerate(NAV_ITEMS):
-            btn = ctk.CTkButton(
-                nav, text=f"  {icon}  {label}",
-                height=42, anchor="w",
-                fg_color="transparent",
-                hover_color="#253d52",
-                text_color="#8aa3b8",
-                font=ctk.CTkFont(size=12),
-                corner_radius=6,
-                command=lambda k=key: self._show_panel(k))
-            btn.grid(row=i + 2, column=0, padx=8, pady=2, sticky="ew")
+        self._nav_btns: dict[str, QPushButton] = {}
+        for key, label in NAV_ITEMS:
+            btn = _make_sidebar_button(label, sidebar)
+            btn.clicked.connect(lambda _checked=False, k=key: self._show_panel(k))
+            layout.addWidget(btn)
+            layout.addSpacing(2)
             self._nav_btns[key] = btn
 
         # Disable builder panels until connected
-        self._nav_btns["chart_editor"].configure(state="disabled")
-        self._nav_btns["dashboard"].configure(state="disabled")
+        self._nav_btns["chart_editor"].setEnabled(False)
+        self._nav_btns["dashboard"].setEnabled(False)
 
-        # Version footer
-        ctk.CTkLabel(nav, text="v0.1.0 — CHAI Laos",
-                     text_color="#4a6278",
-                     font=ctk.CTkFont(size=9)).grid(
-            row=11, column=0, padx=14, pady=(0, 12), sticky="sw")
+        # Spacer
+        layout.addStretch()
+
+        # Version label
+        ver_lbl = QLabel("v0.1.0 — CHAI Laos", sidebar)
+        ver_lbl.setStyleSheet("color: #4a6278; font-size: 9px; background: transparent; padding: 0 6px;")
+        layout.addWidget(ver_lbl)
+
+        return sidebar
 
     def _show_panel(self, name: str):
-        self._config_panel.grid_remove()
-        self._chart_editor.grid_remove()
-        self._dashboard_builder.grid_remove()
+        PANEL_INDEX = {"config": 0, "chart_editor": 1, "dashboard": 2}
+        idx = PANEL_INDEX.get(name, 0)
+        self._content.setCurrentIndex(idx)
 
-        if name == "config":
-            self._config_panel.grid()
-        elif name == "chart_editor":
-            self._chart_editor.grid()
-        elif name == "dashboard":
-            self._dashboard_builder.grid()
+        if name == "dashboard":
             self._dashboard_builder.refresh_library()
 
         self._active_panel = name
         for key, btn in self._nav_btns.items():
             if key == name:
-                btn.configure(fg_color=DHIS2_BLUE, text_color="white",
-                               hover_color="#155a8a")
+                btn.setStyleSheet(_active_sidebar_button_style())
             else:
-                btn.configure(fg_color="transparent", text_color="#8aa3b8",
-                               hover_color="#253d52")
+                btn.setStyleSheet(_inactive_sidebar_button_style())
+                # Re-apply disabled state if button was disabled
+                if not btn.isEnabled():
+                    btn.setStyleSheet(
+                        _inactive_sidebar_button_style()
+                        + "QPushButton { color: #445566; }"
+                    )
 
-    # ─── Content area ─────────────────────────────────────────────────────────
+    # ─── Content panels ───────────────────────────────────────────────────────
 
-    def _build_content(self):
-        content = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        content.grid(row=0, column=1, sticky="nsew")
-        content.grid_rowconfigure(0, weight=1)
-        content.grid_columnconfigure(0, weight=1)
-        self._main_frame = content   # kept for any overlay refs
+    def _build_panels(self):
+        # Panel 0: Config
+        config_panel = QWidget()
+        config_panel.setStyleSheet(f"background-color: {SIDEBAR_BG};")
+        config_scroll = QScrollArea(config_panel)
+        config_scroll.setWidgetResizable(True)
+        config_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        config_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        config_scroll.setStyleSheet(
+            f"QScrollArea {{ background-color: {SIDEBAR_BG}; border: none; }}"
+            "QScrollBar:vertical { width: 8px; background: #162534; }"
+            "QScrollBar::handle:vertical { background: #2a4a6a; border-radius: 4px; min-height: 20px; }"
+            "QScrollBar::handle:vertical:hover { background: #3a5a7a; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
 
-        # ── Config panel ──────────────────────────────────────────────────────
-        self._config_panel = ctk.CTkFrame(
-            content, corner_radius=0, fg_color="#f7f9fc")
-        self._config_panel.grid(row=0, column=0, sticky="nsew")
-        self._config_panel.grid_rowconfigure(0, weight=1)
-        self._config_panel.grid_columnconfigure(0, weight=1)
-        self._build_config_content(self._config_panel)
+        config_inner = QWidget()
+        config_inner.setStyleSheet(f"background-color: {SIDEBAR_BG};")
+        config_scroll.setWidget(config_inner)
 
-        # ── Chart Editor ──────────────────────────────────────────────────────
+        panel_layout = QVBoxLayout(config_panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.addWidget(config_scroll)
+
+        self._build_config_content(config_inner)
+        self._content.addWidget(config_panel)          # index 0
+
+        # Panel 1: Chart Editor
         self._chart_editor = ChartEditorPanel(
-            content,
+            self._content,
             callbacks={
                 "on_chart_saved":         self._on_chart_saved,
                 "on_add_to_dashboard":    self._on_add_to_dashboard,
                 "on_generate_ai":         self._on_ai_generate,
                 "on_switch_to_dashboard": lambda: self._show_panel("dashboard"),
-                "get_api_key": lambda: self.apikey_entry.get().strip() or self._api_key,
+                "get_api_key": lambda: self.apikey_entry.text().strip() or self._api_key,
                 "get_model":   self._get_model,
             })
-        self._chart_editor.grid(row=0, column=0, sticky="nsew")
-        self._chart_editor.grid_remove()
-        self._viz_panel = self._chart_editor   # alias for load_metadata
+        self._content.addWidget(self._chart_editor)    # index 1
+        self._viz_panel = self._chart_editor            # alias for load_metadata
 
-        # ── Dashboard Builder ─────────────────────────────────────────────────
+        # Panel 2: Dashboard Builder
         self._dashboard_builder = DashboardBuilderPanel(
-            content,
+            self._content,
             callbacks={
                 "on_export":           self._on_export,
                 "on_deploy":           self._on_deploy_dashboard,
                 "on_switch_to_editor": lambda: self._show_panel("chart_editor"),
             })
-        self._dashboard_builder.grid(row=0, column=0, sticky="nsew")
-        self._dashboard_builder.grid_remove()
-        self._dashboard_panel = self._dashboard_builder  # alias
+        self._content.addWidget(self._dashboard_builder)   # index 2
+        self._dashboard_panel = self._dashboard_builder    # alias
 
-        self._build_statusbar(content)
-        # Highlight default panel
-        self._show_panel("config")
+    # ─── Config panel content ─────────────────────────────────────────────────
 
-    def _build_config_content(self, parent):
-        """Config panel content — same as old sidebar but in full content area."""
-        cf_outer = ctk.CTkScrollableFrame(
-            parent, fg_color=SIDEBAR_BG, corner_radius=0,
-            scrollbar_button_color="#2a4a6a",
-            scrollbar_button_hover_color="#3a5a7a")
-        cf_outer.grid(row=0, column=0, sticky="nsew")
-        cf_outer.grid_columnconfigure(0, weight=1)
-        cf = cf_outer
+    def _build_config_content(self, parent: QWidget):
+        layout = QVBoxLayout(parent)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # ── DHIS2 Connection section ──────────────────────────────────────────
-        self._sb_section(cf, "DHIS2 Connection", row=0)
+        layout.addWidget(self._sb_section("DHIS2 Connection"))
 
         # Saved profiles row
-        prof_row = ctk.CTkFrame(cf, fg_color="transparent")
-        prof_row.grid(row=1, column=0, padx=16, pady=(2, 4), sticky="ew")
-        prof_row.grid_columnconfigure(0, weight=1)
+        prof_row = QWidget()
+        prof_row.setStyleSheet("background: transparent;")
+        prof_hl = QHBoxLayout(prof_row)
+        prof_hl.setContentsMargins(16, 2, 16, 4)
+        prof_hl.setSpacing(4)
 
-        self.profile_var = ctk.StringVar(value="— Saved profiles —")
-        self.profile_menu = ctk.CTkOptionMenu(
-            prof_row, variable=self.profile_var,
-            values=["— Saved profiles —"],
-            height=28, font=ctk.CTkFont(size=11),
-            fg_color="#253d52", button_color="#2a4a6a",
-            button_hover_color="#1a3a5a",
-            command=self._on_profile_selected)
-        self.profile_menu.grid(row=0, column=0, sticky="ew")
+        self.profile_menu = QComboBox()
+        self.profile_menu.addItem("— Saved profiles —")
+        self.profile_menu.setStyleSheet(
+            "QComboBox { background: #253d52; color: white; border: 1px solid #2a4a6a;"
+            " border-radius: 4px; padding: 3px 8px; font-size: 11px; min-height: 26px; }"
+            "QComboBox::drop-down { border: none; width: 18px; }"
+            "QComboBox QAbstractItemView { background: #253d52; color: white;"
+            " selection-background-color: #1a6fa8; }"
+        )
+        self.profile_menu.currentTextChanged.connect(self._on_profile_selected)
+        prof_hl.addWidget(self.profile_menu, 1)
 
-        self.del_profile_btn = ctk.CTkButton(
-            prof_row, text="✕", width=28, height=28,
-            fg_color="#3a2020", hover_color="#5a2020",
-            font=ctk.CTkFont(size=11),
-            command=self._on_delete_profile)
-        self.del_profile_btn.grid(row=0, column=1, padx=(4, 0))
-        self._set_tooltip(self.del_profile_btn, "Delete selected profile")
+        self.del_profile_btn = QPushButton("✕")
+        self.del_profile_btn.setFixedSize(28, 28)
+        self.del_profile_btn.setToolTip("Delete selected profile")
+        self.del_profile_btn.setStyleSheet(
+            "QPushButton { background: #3a2020; color: white; border: none; border-radius: 4px; font-size: 11px; }"
+            "QPushButton:hover { background: #5a2020; }"
+        )
+        self.del_profile_btn.clicked.connect(self._on_delete_profile)
+        prof_hl.addWidget(self.del_profile_btn)
+        layout.addWidget(prof_row)
 
-        # ── Login fields (collapsible) ────────────────────────────────────────
-        self._login_frame = ctk.CTkFrame(cf, fg_color="transparent")
-        self._login_frame.grid(row=2, column=0, sticky="ew")
-        self._login_frame.grid_columnconfigure(0, weight=1)
-        lf = self._login_frame
+        # ── Login fields ──────────────────────────────────────────────────────
+        self._login_frame = QWidget()
+        self._login_frame.setStyleSheet("background: transparent;")
+        lf_layout = QVBoxLayout(self._login_frame)
+        lf_layout.setContentsMargins(16, 0, 16, 0)
+        lf_layout.setSpacing(2)
 
-        ctk.CTkLabel(lf, text="Server URL", text_color=SIDEBAR_FG,
-                     font=ctk.CTkFont(size=12)).grid(row=0, column=0, padx=16, sticky="w")
-        self.url_entry = ctk.CTkEntry(lf, placeholder_text="https://hmis.example.org",
-                                      height=32)
-        self.url_entry.grid(row=1, column=0, padx=16, pady=(2, 6), sticky="ew")
+        lf_layout.addWidget(self._field_label("Server URL"))
+        self.url_entry = QLineEdit()
+        self.url_entry.setPlaceholderText("https://hmis.example.org")
+        self.url_entry.setFixedHeight(32)
+        self.url_entry.setStyleSheet(self._entry_style())
+        lf_layout.addWidget(self.url_entry)
+        lf_layout.addSpacing(4)
 
-        ctk.CTkLabel(lf, text="Username", text_color=SIDEBAR_FG,
-                     font=ctk.CTkFont(size=12)).grid(row=2, column=0, padx=16, sticky="w")
-        self.user_entry = ctk.CTkEntry(lf, placeholder_text="admin", height=32)
-        self.user_entry.grid(row=3, column=0, padx=16, pady=(2, 6), sticky="ew")
+        lf_layout.addWidget(self._field_label("Username"))
+        self.user_entry = QLineEdit()
+        self.user_entry.setPlaceholderText("admin")
+        self.user_entry.setFixedHeight(32)
+        self.user_entry.setStyleSheet(self._entry_style())
+        lf_layout.addWidget(self.user_entry)
+        lf_layout.addSpacing(4)
 
-        ctk.CTkLabel(lf, text="Password", text_color=SIDEBAR_FG,
-                     font=ctk.CTkFont(size=12)).grid(row=4, column=0, padx=16, sticky="w")
-        self.pass_entry = ctk.CTkEntry(lf, placeholder_text="••••••••",
-                                       show="*", height=32)
-        self.pass_entry.grid(row=5, column=0, padx=16, pady=(2, 6), sticky="ew")
+        lf_layout.addWidget(self._field_label("Password"))
+        self.pass_entry = QLineEdit()
+        self.pass_entry.setPlaceholderText("••••••••")
+        self.pass_entry.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pass_entry.setFixedHeight(32)
+        self.pass_entry.setStyleSheet(self._entry_style())
+        lf_layout.addWidget(self.pass_entry)
+        lf_layout.addSpacing(4)
 
-        btn_row = ctk.CTkFrame(lf, fg_color="transparent")
-        btn_row.grid(row=6, column=0, padx=16, pady=(0, 6), sticky="w")
+        # Buttons row
+        btn_row = QWidget()
+        btn_row.setStyleSheet("background: transparent;")
+        btn_hl = QHBoxLayout(btn_row)
+        btn_hl.setContentsMargins(0, 0, 0, 6)
+        btn_hl.setSpacing(4)
 
-        self.connect_btn = ctk.CTkButton(
-            btn_row, text="Connect", width=140, height=34,
-            fg_color=DHIS2_BLUE, hover_color="#155a8a",
-            command=self._on_connect)
-        self.connect_btn.pack(side="left")
+        self.connect_btn = QPushButton("Connect")
+        self.connect_btn.setFixedHeight(34)
+        self.connect_btn.setMinimumWidth(120)
+        self.connect_btn.setStyleSheet(
+            f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
+            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+            "QPushButton:hover { background: #155a8a; }"
+            "QPushButton:disabled { background: #27ae60; color: white; }"
+        )
+        self.connect_btn.clicked.connect(self._on_connect)
+        btn_hl.addWidget(self.connect_btn)
 
-        self.save_profile_btn = ctk.CTkButton(
-            btn_row, text="💾", width=34, height=34,
-            fg_color="#1a5a2a", hover_color="#145020",
-            font=ctk.CTkFont(size=14),
-            command=self._on_save_profile)
-        self.save_profile_btn.pack(side="left", padx=(4, 0))
-        self._set_tooltip(self.save_profile_btn, "Save credentials to Windows Credential Manager")
+        self.save_profile_btn = QPushButton("\U0001f4be")
+        self.save_profile_btn.setFixedSize(34, 34)
+        self.save_profile_btn.setToolTip("Save credentials to Windows Credential Manager")
+        self.save_profile_btn.setStyleSheet(
+            "QPushButton { background: #1a5a2a; color: white; border: none; border-radius: 4px; font-size: 14px; }"
+            "QPushButton:hover { background: #145020; }"
+        )
+        self.save_profile_btn.clicked.connect(self._on_save_profile)
+        btn_hl.addWidget(self.save_profile_btn)
 
-        self.refresh_btn = ctk.CTkButton(
-            btn_row, text="↻", width=34, height=34,
-            fg_color="#2a4a6a", hover_color="#1a3a5a",
-            font=ctk.CTkFont(size=16),
-            command=self._on_refresh_metadata)
-        self.refresh_btn.pack(side="left", padx=(4, 0))
-        self._set_tooltip(self.refresh_btn, "Force re-fetch metadata from server")
+        self.refresh_btn = QPushButton("↻")
+        self.refresh_btn.setFixedSize(34, 34)
+        self.refresh_btn.setToolTip("Force re-fetch metadata from server")
+        self.refresh_btn.setStyleSheet(
+            "QPushButton { background: #2a4a6a; color: white; border: none; border-radius: 4px; font-size: 16px; }"
+            "QPushButton:hover { background: #1a3a5a; }"
+            "QPushButton:disabled { background: #223344; color: #667788; }"
+        )
+        self.refresh_btn.clicked.connect(self._on_refresh_metadata)
+        btn_hl.addWidget(self.refresh_btn)
+        btn_hl.addStretch()
+
+        lf_layout.addWidget(btn_row)
+        layout.addWidget(self._login_frame)
 
         # ── Post-connect widgets ──────────────────────────────────────────────
-        self.change_conn_btn = ctk.CTkButton(
-            cf, text="↺ Change connection", height=28,
-            fg_color="transparent", border_width=1, border_color="#4a6278",
-            text_color="#8aa3b8", hover_color="#253d52",
-            font=ctk.CTkFont(size=11),
-            command=self._on_change_connection)
-        self.change_conn_btn.grid(row=3, column=0, padx=16, pady=(0, 4), sticky="ew")
-        self.change_conn_btn.grid_remove()
+        self.change_conn_btn = QPushButton("↺ Change connection")
+        self.change_conn_btn.setFixedHeight(28)
+        self.change_conn_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #8aa3b8; border: 1px solid #4a6278;"
+            "  border-radius: 4px; font-size: 11px; margin: 0 16px; }"
+            "QPushButton:hover { background: #253d52; }"
+        )
+        self.change_conn_btn.clicked.connect(self._on_change_connection)
+        self.change_conn_btn.hide()
+        layout.addWidget(self.change_conn_btn)
+        layout.addSpacing(4)
 
-        self.conn_status = ctk.CTkLabel(cf, text="● Not connected",
-                                        text_color="#8aa3b8",
-                                        font=ctk.CTkFont(size=11))
-        self.conn_status.grid(row=4, column=0, padx=16, pady=(0, 2), sticky="w")
+        self.conn_status = QLabel("● Not connected")
+        self.conn_status.setStyleSheet("color: #8aa3b8; font-size: 11px; padding: 0 16px; background: transparent;")
+        layout.addWidget(self.conn_status)
+        layout.addSpacing(2)
 
-        self.cache_lbl = ctk.CTkLabel(cf, text="", text_color="#4a6278",
-                                       font=ctk.CTkFont(size=10))
-        self.cache_lbl.grid(row=5, column=0, padx=16, pady=(0, 4), sticky="w")
+        self.cache_lbl = QLabel("")
+        self.cache_lbl.setStyleSheet("color: #4a6278; font-size: 10px; padding: 0 16px; background: transparent;")
+        layout.addWidget(self.cache_lbl)
+        layout.addSpacing(4)
 
-        self.filter_btn = ctk.CTkButton(
-            cf, text="⚙ Filters & Load Metadata",
-            height=34, fg_color="#2a4a6a", hover_color="#1a3a5a",
-            state="disabled", command=self._on_open_filter_config)
-        self.filter_btn.grid(row=6, column=0, padx=16, pady=(0, 2), sticky="ew")
+        self.filter_btn = QPushButton("⚙ Filters && Load Metadata")
+        self.filter_btn.setFixedHeight(34)
+        self.filter_btn.setEnabled(False)
+        self.filter_btn.setStyleSheet(
+            "QPushButton { background: #2a4a6a; color: white; border: none; border-radius: 4px;"
+            "  font-size: 12px; margin: 0 16px; }"
+            "QPushButton:hover { background: #1a3a5a; }"
+            "QPushButton:disabled { background: #223344; color: #667788; }"
+        )
+        self.filter_btn.clicked.connect(self._on_open_filter_config)
+        layout.addWidget(self.filter_btn)
+        layout.addSpacing(2)
 
-        self.filter_summary_lbl = ctk.CTkLabel(
-            cf, text="", text_color="#f39c12",
-            font=ctk.CTkFont(size=10), wraplength=240, justify="left")
-        self.filter_summary_lbl.grid(row=7, column=0, padx=16, pady=(0, 8), sticky="w")
+        self.filter_summary_lbl = QLabel("")
+        self.filter_summary_lbl.setWordWrap(True)
+        self.filter_summary_lbl.setStyleSheet(
+            "color: #f39c12; font-size: 10px; padding: 0 16px; background: transparent;"
+        )
+        layout.addWidget(self.filter_summary_lbl)
+        layout.addSpacing(8)
 
         # ── Anthropic API Key ─────────────────────────────────────────────────
-        self._sb_section(cf, "Anthropic API Key", row=8)
+        layout.addWidget(self._sb_section("Anthropic API Key"))
 
-        apikey_row = ctk.CTkFrame(cf, fg_color="transparent")
-        apikey_row.grid(row=9, column=0, padx=16, pady=(4, 0), sticky="ew")
-        apikey_row.grid_columnconfigure(0, weight=1)
+        apikey_row = QWidget()
+        apikey_row.setStyleSheet("background: transparent;")
+        ak_hl = QHBoxLayout(apikey_row)
+        ak_hl.setContentsMargins(16, 4, 16, 0)
+        ak_hl.setSpacing(4)
 
-        self.apikey_entry = ctk.CTkEntry(apikey_row, placeholder_text="sk-ant-…",
-                                          show="*", height=32)
-        self.apikey_entry.grid(row=0, column=0, sticky="ew")
+        self.apikey_entry = QLineEdit()
+        self.apikey_entry.setPlaceholderText("sk-ant-…")
+        self.apikey_entry.setEchoMode(QLineEdit.EchoMode.Password)
+        self.apikey_entry.setFixedHeight(32)
+        self.apikey_entry.setStyleSheet(self._entry_style())
+        ak_hl.addWidget(self.apikey_entry, 1)
         if self._api_key:
-            self.apikey_entry.insert(0, self._api_key)
+            self.apikey_entry.setText(self._api_key)
 
-        self.save_apikey_btn = ctk.CTkButton(
-            apikey_row, text="💾", width=34, height=32,
-            fg_color="#1a5a2a", hover_color="#145020",
-            font=ctk.CTkFont(size=14),
-            command=self._on_save_api_key)
-        self.save_apikey_btn.grid(row=0, column=1, padx=(4, 0))
-        self._set_tooltip(self.save_apikey_btn, "Save API key to Windows Credential Manager")
+        self.save_apikey_btn = QPushButton("\U0001f4be")
+        self.save_apikey_btn.setFixedSize(34, 32)
+        self.save_apikey_btn.setToolTip("Save API key to Windows Credential Manager")
+        self.save_apikey_btn.setStyleSheet(
+            "QPushButton { background: #1a5a2a; color: white; border: none; border-radius: 4px; font-size: 14px; }"
+            "QPushButton:hover { background: #145020; }"
+        )
+        self.save_apikey_btn.clicked.connect(self._on_save_api_key)
+        ak_hl.addWidget(self.save_apikey_btn)
+        layout.addWidget(apikey_row)
 
         # ── AI Model ─────────────────────────────────────────────────────────
-        self._sb_section(cf, "AI Model", row=10)
+        layout.addWidget(self._sb_section("AI Model"))
 
         self._MODEL_OPTIONS = {
             "Haiku 4.5  (fast, cheap)":  "claude-haiku-4-5-20251001",
             "Sonnet 4.6  (balanced)":    "claude-sonnet-4-6",
             "Opus 4.7  (best quality)":  "claude-opus-4-7",
         }
-        self._model_var = ctk.StringVar(value=list(self._MODEL_OPTIONS.keys())[0])
-        ctk.CTkOptionMenu(
-            cf, variable=self._model_var,
-            values=list(self._MODEL_OPTIONS.keys()),
-            height=30,
-            fg_color="white", button_color="#b8cfe8", button_hover_color="#9abcd8",
-            text_color="#1e2d3d", dropdown_fg_color="white", dropdown_text_color="#1e2d3d",
-            font=ctk.CTkFont(size=11),
-        ).grid(row=11, column=0, padx=16, pady=(2, 0), sticky="ew")
+        self.model_combo = QComboBox()
+        for label in self._MODEL_OPTIONS:
+            self.model_combo.addItem(label)
+        self.model_combo.setStyleSheet(
+            "QComboBox { background: white; color: #1e2d3d; border: 1px solid #c0cdd8;"
+            "  border-radius: 4px; padding: 3px 8px; font-size: 11px; min-height: 28px; margin: 2px 16px 0 16px; }"
+            "QComboBox::drop-down { border: none; width: 18px; }"
+            "QComboBox QAbstractItemView { background: white; color: #1e2d3d;"
+            "  selection-background-color: #dbeafe; }"
+        )
+        layout.addWidget(self.model_combo)
 
         # Footer
-        ctk.CTkLabel(cf, text="v0.1.0 — CHAI Laos",
-                     text_color="#4a6278",
-                     font=ctk.CTkFont(size=10)).grid(
-            row=12, column=0, padx=16, pady=(16, 12), sticky="w")
+        footer = QLabel("v0.1.0 — CHAI Laos")
+        footer.setStyleSheet("color: #4a6278; font-size: 10px; padding: 16px 16px 12px 16px; background: transparent;")
+        layout.addWidget(footer)
+        layout.addStretch()
 
-    def _sb_section(self, parent, label: str, row: int):
-        ctk.CTkLabel(parent, text=label,
-                     font=ctk.CTkFont(size=11, weight="bold"),
-                     text_color="#8aa3b8").grid(
-            row=row, column=0, padx=20, pady=(8, 2), sticky="w")
+    # ── Config panel helpers ───────────────────────────────────────────────
+
+    def _sb_section(self, label: str) -> QLabel:
+        lbl = QLabel(label)
+        lbl.setStyleSheet(
+            "color: #8aa3b8; font-size: 11px; font-weight: bold;"
+            "padding: 8px 20px 2px 20px; background: transparent;"
+        )
+        return lbl
+
+    def _field_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color: white; font-size: 12px; background: transparent;")
+        return lbl
+
+    def _entry_style(self) -> str:
+        return (
+            "QLineEdit { background: #253d52; color: white; border: 1px solid #2a4a6a;"
+            "  border-radius: 4px; padding: 4px 8px; font-size: 12px; }"
+            "QLineEdit:focus { border-color: #1a6fa8; }"
+        )
 
     def _get_model(self) -> str:
-        return self._MODEL_OPTIONS.get(self._model_var.get(), "claude-haiku-4-5-20251001")
+        label = self.model_combo.currentText()
+        return self._MODEL_OPTIONS.get(label, "claude-haiku-4-5-20251001")
 
-    def _set_tooltip(self, widget, text: str):
-        # Simple hover tooltip via label — lightweight, no extra lib needed
-        tip = None
-        def show(e):
-            nonlocal tip
-            tip = ctk.CTkLabel(self, text=text, fg_color="#333",
-                                text_color="white", corner_radius=4,
-                                font=ctk.CTkFont(size=10))
-            tip.place(x=e.x_root - self.winfo_rootx() + 12,
-                      y=e.y_root - self.winfo_rooty() + 12)
-        def hide(e):
-            nonlocal tip
-            if tip:
-                tip.destroy()
-                tip = None
-        widget.bind("<Enter>", show)
-        widget.bind("<Leave>", hide)
+    # ─── Status bar ───────────────────────────────────────────────────────────
 
+    def _build_statusbar(self):
+        sb = self.statusBar()
+        sb.setStyleSheet(
+            "QStatusBar { background: #eef2f7; border-top: 1px solid #d0dde8;"
+            "  color: #6b8299; font-size: 11px; }"
+            "QStatusBar::item { border: none; }"
+        )
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("color: #6b8299; padding: 0 8px;")
+        sb.addWidget(self.status_label, 1)
 
-    def _build_statusbar(self, parent):
-        sb = ctk.CTkFrame(parent, height=28, corner_radius=0, fg_color="#eef2f7")
-        sb.grid(row=1, column=0, sticky="ew")  # content frame only has col 0
-        sb.grid_propagate(False)
-        self.status_label = ctk.CTkLabel(sb, text="Ready",
-                                          font=ctk.CTkFont(size=11),
-                                          text_color="#6b8299")
-        self.status_label.pack(side="left", padx=16)
-        self.progress = ctk.CTkProgressBar(sb, width=160, height=10,
-                                            mode="indeterminate")
-        self.progress.pack(side="right", padx=16, pady=8)
-        self.progress.stop()
-        self.progress.set(0)
+        self.progress = QProgressBar()
+        self.progress.setFixedSize(160, 10)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        self.progress.setTextVisible(False)
+        self.progress.setStyleSheet(
+            "QProgressBar { border: 1px solid #c0cdd8; border-radius: 4px; background: #e8eef5; }"
+            "QProgressBar::chunk { background: #1a6fa8; border-radius: 3px; }"
+        )
+        sb.addPermanentWidget(self.progress)
+
+    def _set_status(self, msg: str, error: bool = False):
+        color = "#e74c3c" if error else "#6b8299"
+        self.status_label.setStyleSheet(f"color: {color}; padding: 0 8px;")
+        self.status_label.setText(msg)
+
+    def _start_progress(self):
+        self.progress.setRange(0, 0)  # indeterminate
+
+    def _stop_progress(self):
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
 
     # ─── Saved credentials ───────────────────────────────────────────────────
 
@@ -442,28 +621,31 @@ class AppWindow(ctk.CTk):
             saved_key = load_api_key()
             if saved_key:
                 self._api_key = saved_key
-                self.apikey_entry.delete(0, "end")
-                self.apikey_entry.insert(0, saved_key)
+                self.apikey_entry.setText(saved_key)
 
         # Auto-connect using first saved profile
         if self._profiles:
             p = self._profiles[0]
-            self.profile_var.set(profile_label(p))
-            self.url_entry.delete(0, "end")
-            self.url_entry.insert(0, p["url"])
-            self.user_entry.delete(0, "end")
-            self.user_entry.insert(0, p["username"])
+            # Block signals while filling to avoid triggering _on_profile_selected
+            self.profile_menu.blockSignals(True)
+            self.profile_menu.setCurrentText(profile_label(p))
+            self.profile_menu.blockSignals(False)
+            self.url_entry.setText(p["url"])
+            self.user_entry.setText(p["username"])
             pwd = load_password(p["url"], p["username"])
-            self.pass_entry.delete(0, "end")
             if pwd:
-                self.pass_entry.insert(0, pwd)
-                self.after(200, self._on_connect)
+                self.pass_entry.setText(pwd)
+                QTimer.singleShot(200, self._on_connect)
 
     def _refresh_profile_menu(self):
         from config.credentials import profile_label
-        labels = ["— Saved profiles —"] + [profile_label(p) for p in self._profiles]
-        self.profile_menu.configure(values=labels)
-        self.profile_var.set(labels[0])
+        self.profile_menu.blockSignals(True)
+        self.profile_menu.clear()
+        self.profile_menu.addItem("— Saved profiles —")
+        for p in self._profiles:
+            self.profile_menu.addItem(profile_label(p))
+        self.profile_menu.setCurrentIndex(0)
+        self.profile_menu.blockSignals(False)
 
     def _on_profile_selected(self, label: str):
         if label == "— Saved profiles —":
@@ -472,30 +654,33 @@ class AppWindow(ctk.CTk):
         self._profiles = load_profiles()
         for p in self._profiles:
             if profile_label(p) == label:
-                # Ensure entries are editable before filling
-                for w in (self.url_entry, self.user_entry, self.pass_entry):
-                    w.configure(state="normal")
-                self.url_entry.delete(0, "end")
-                self.url_entry.insert(0, p["url"])
-                self.user_entry.delete(0, "end")
-                self.user_entry.insert(0, p["username"])
+                self.url_entry.setReadOnly(False)
+                self.user_entry.setReadOnly(False)
+                self.pass_entry.setReadOnly(False)
+                self.url_entry.setText(p["url"])
+                self.user_entry.setText(p["username"])
                 pwd = load_password(p["url"], p["username"])
-                self.pass_entry.delete(0, "end")
+                self.pass_entry.clear()
                 if pwd:
-                    self.pass_entry.insert(0, pwd)
+                    self.pass_entry.setText(pwd)
                 # Reset connect button in case it shows "✓ Connected"
-                self.connect_btn.configure(
-                    state="normal", text="Connect",
-                    fg_color=DHIS2_BLUE, hover_color="#155a8a")
-                self.change_conn_btn.grid_remove()
+                self.connect_btn.setEnabled(True)
+                self.connect_btn.setText("Connect")
+                self.connect_btn.setStyleSheet(
+                    f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
+                    "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+                    "QPushButton:hover { background: #155a8a; }"
+                    "QPushButton:disabled { background: #27ae60; color: white; }"
+                )
+                self.change_conn_btn.hide()
                 # Auto-connect after filling credentials
-                self.after(100, self._on_connect)
+                QTimer.singleShot(100, self._on_connect)
                 break
 
     def _on_save_profile(self):
-        url  = self.url_entry.get().strip()
-        user = self.user_entry.get().strip()
-        pwd  = self.pass_entry.get()
+        url  = self.url_entry.text().strip()
+        user = self.user_entry.text().strip()
+        pwd  = self.pass_entry.text()
         if not (url and user):
             self._set_status("Enter URL and username before saving.", error=True)
             return
@@ -506,16 +691,20 @@ class AppWindow(ctk.CTk):
         self._set_status(f"Profile saved: {user} @ {url}")
 
     def _on_delete_profile(self):
-        label = self.profile_var.get()
+        label = self.profile_menu.currentText()
         if label == "— Saved profiles —":
             return
         from config.credentials import delete_profile, load_profiles, profile_label
         self._profiles = load_profiles()
         for p in self._profiles:
             if profile_label(p) == label:
-                if msgbox.askyesno("Delete profile",
-                                   f"Delete saved profile:\n{label}\n\n"
-                                   "Password will be removed from Windows Credential Manager."):
+                reply = QMessageBox.question(
+                    self, "Delete profile",
+                    f"Delete saved profile:\n{label}\n\n"
+                    "Password will be removed from Windows Credential Manager.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
                     delete_profile(p["url"], p["username"])
                     self._profiles = load_profiles()
                     self._refresh_profile_menu()
@@ -523,7 +712,7 @@ class AppWindow(ctk.CTk):
                 return
 
     def _on_save_api_key(self):
-        key = self.apikey_entry.get().strip()
+        key = self.apikey_entry.text().strip()
         if not key:
             self._set_status("Enter API key first.", error=True)
             return
@@ -534,27 +723,28 @@ class AppWindow(ctk.CTk):
     # ─── Connect (cache-first) ────────────────────────────────────────────────
 
     def _on_connect(self):
-        url  = self.url_entry.get().strip()
-        user = self.user_entry.get().strip()
-        pwd  = self.pass_entry.get()
+        url  = self.url_entry.text().strip()
+        user = self.user_entry.text().strip()
+        pwd  = self.pass_entry.text()
         if not (url and user and pwd):
             self._set_status("Fill in URL, username, and password.", error=True)
             return
 
-        self.connect_btn.configure(state="disabled", text="Connecting…")
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Connecting…")
         self._set_status("Testing connection…")
         self._start_progress()
         threading.Thread(target=self._connect_worker,
                          args=(url, user, pwd, False), daemon=True).start()
 
     def _on_refresh_metadata(self):
-        url  = self.url_entry.get().strip()
-        user = self.user_entry.get().strip()
-        pwd  = self.pass_entry.get()
+        url  = self.url_entry.text().strip()
+        user = self.user_entry.text().strip()
+        pwd  = self.pass_entry.text()
         if not (url and user and pwd):
             self._set_status("Fill in connection details first.", error=True)
             return
-        self.refresh_btn.configure(state="disabled")
+        self.refresh_btn.setEnabled(False)
         self._set_status("Re-fetching metadata from server…")
         self._start_progress()
         threading.Thread(target=self._connect_worker,
@@ -572,7 +762,7 @@ class AppWindow(ctk.CTk):
             display = me.get("name") or me.get("username") or user
 
             # Always load filter options (lightweight — just group names)
-            self.after(0, self._set_status, f"Connected as {display}. Loading filter options…")
+            QTimer.singleShot(0, lambda: self._set_status(f"Connected as {display}. Loading filter options…"))
             filter_options = fetch_all_filter_options(client)
             self._client         = client
             self._filter_options = filter_options
@@ -586,11 +776,11 @@ class AppWindow(ctk.CTk):
                 self._invalidate_ctx_caches()
                 count = (len(cached_meta.get("indicators", [])) +
                          len(cached_meta.get("program_indicators", [])))
-                self.after(0, self._on_connect_done, display, count, cached_at, True)
+                QTimer.singleShot(0, lambda: self._on_connect_done(display, count, cached_at, True))
                 return
 
             # No cache — fetch with current filter config
-            self.after(0, self._set_status, "Fetching metadata…")
+            QTimer.singleShot(0, lambda: self._set_status("Fetching metadata…"))
             metadata = fetch_all(client, self._filter_cfg)
             cache_save(url, metadata)
             self._metadata   = metadata
@@ -599,34 +789,42 @@ class AppWindow(ctk.CTk):
 
             count = (len(metadata.get("indicators", [])) +
                      len(metadata.get("program_indicators", [])))
-            self.after(0, self._on_connect_done, display, count, None, False)
+            QTimer.singleShot(0, lambda: self._on_connect_done(display, count, None, False))
 
         except Exception as exc:
-            self.after(0, self._on_connect_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_connect_fail(exc_msg))
 
     def _on_connect_done(self, display: str, count: int,
                           cached_at: str | None, from_cache: bool = False):
         self._stop_progress()
         # Show connected state — disable login fields until "Change" is clicked
-        self.connect_btn.configure(
-            state="disabled", text="✓ Connected",
-            fg_color="#27ae60", hover_color="#1e8449")
-        self._login_frame.grid_remove()   # hide URL/user/pass fields
-        self.change_conn_btn.grid()
-        self.refresh_btn.configure(state="normal")
-        self.filter_btn.configure(state="normal")
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("✓ Connected")
+        self.connect_btn.setStyleSheet(
+            "QPushButton { background: #27ae60; color: white; border: none;"
+            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }"
+            "QPushButton:disabled { background: #27ae60; color: white; }"
+        )
+        self._login_frame.hide()
+        self.change_conn_btn.show()
+        self.refresh_btn.setEnabled(True)
+        self.filter_btn.setEnabled(True)
         n_de   = len((self._metadata or {}).get("data_elements", []))
         n_prog = len((self._metadata or {}).get("programs", []))
         status_text = f"● {display}  ({n_de} DEs"
         if n_prog:
             status_text += f" | {n_prog} programs"
         status_text += ")"
-        self.conn_status.configure(text=status_text, text_color="#2ecc71")
+        self.conn_status.setText(status_text)
+        self.conn_status.setStyleSheet("color: #2ecc71; font-size: 11px; padding: 0 16px; background: transparent;")
         if from_cache and cached_at:
-            self.cache_lbl.configure(text=f"Cached — {cached_at}", text_color="#f39c12")
+            self.cache_lbl.setText(f"Cached — {cached_at}")
+            self.cache_lbl.setStyleSheet("color: #f39c12; font-size: 10px; padding: 0 16px; background: transparent;")
             self._set_status(f"Using cached metadata from {cached_at}. Press ↻ or reconfigure filters.")
         else:
-            self.cache_lbl.configure(text="Metadata freshly loaded.", text_color="#27ae60")
+            self.cache_lbl.setText("Metadata freshly loaded.")
+            self.cache_lbl.setStyleSheet("color: #27ae60; font-size: 10px; padding: 0 16px; background: transparent;")
             self._set_status(f"Ready — {n_de} data elements, {n_prog} programs loaded.")
         self._update_filter_summary()
         self._unlock_ui()   # enables Chart Editor + Dashboard nav buttons
@@ -637,24 +835,35 @@ class AppWindow(ctk.CTk):
 
     def _on_connect_fail(self, msg: str):
         self._stop_progress()
-        self.connect_btn.configure(
-            state="normal", text="Connect",
-            fg_color=DHIS2_BLUE, hover_color="#155a8a")
-        self.refresh_btn.configure(state="normal")
-        self.conn_status.configure(text="● Connection failed", text_color="#e74c3c")
+        self.connect_btn.setEnabled(True)
+        self.connect_btn.setText("Connect")
+        self.connect_btn.setStyleSheet(
+            f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
+            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+            "QPushButton:hover { background: #155a8a; }"
+            "QPushButton:disabled { background: #27ae60; color: white; }"
+        )
+        self.refresh_btn.setEnabled(True)
+        self.conn_status.setText("● Connection failed")
+        self.conn_status.setStyleSheet("color: #e74c3c; font-size: 11px; padding: 0 16px; background: transparent;")
         self._set_status(f"Connection failed: {msg}", error=True)
 
     def _on_change_connection(self):
         """Switch to config panel so user can change connection."""
         self._show_panel("config")
-        self._login_frame.grid()
-        self.url_entry.configure(state="normal")
-        self.user_entry.configure(state="normal")
-        self.pass_entry.configure(state="normal")
-        self.connect_btn.configure(
-            state="normal", text="Connect",
-            fg_color=DHIS2_BLUE, hover_color="#155a8a")
-        self.change_conn_btn.grid_remove()
+        self._login_frame.show()
+        self.url_entry.setReadOnly(False)
+        self.user_entry.setReadOnly(False)
+        self.pass_entry.setReadOnly(False)
+        self.connect_btn.setEnabled(True)
+        self.connect_btn.setText("Connect")
+        self.connect_btn.setStyleSheet(
+            f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
+            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+            "QPushButton:hover { background: #155a8a; }"
+            "QPushButton:disabled { background: #27ae60; color: white; }"
+        )
+        self.change_conn_btn.hide()
 
     # ─── Filter Config & Load Metadata ───────────────────────────────────────
 
@@ -667,7 +876,7 @@ class AppWindow(ctk.CTk):
         dlg = FilterConfigDialog(self,
                                   self._filter_options or {},
                                   self._filter_cfg)
-        self.wait_window(dlg)
+        dlg.exec()
 
         if dlg.result is None:
             return  # cancelled
@@ -676,7 +885,8 @@ class AppWindow(ctk.CTk):
         self._update_filter_summary()
         self._set_status("Filter configured. Loading metadata…")
         self._start_progress()
-        self.filter_btn.configure(state="disabled", text="Loading…")
+        self.filter_btn.setEnabled(False)
+        self.filter_btn.setText("Loading…")
 
         threading.Thread(target=self._load_metadata_worker, daemon=True).start()
 
@@ -685,7 +895,7 @@ class AppWindow(ctk.CTk):
             from dhis2.metadata import fetch_all
             from dhis2.cache import save as cache_save, save_filter_cfg
 
-            url      = self.url_entry.get().strip()
+            url      = self.url_entry.text().strip()
             metadata = fetch_all(self._client, self._filter_cfg)
             cache_save(url, metadata)
             save_filter_cfg(url, self._filter_cfg)   # persist filter separately
@@ -695,16 +905,18 @@ class AppWindow(ctk.CTk):
 
             count = (len(metadata.get("indicators", [])) +
                      len(metadata.get("program_indicators", [])))
-            self.after(0, self._on_metadata_loaded, count)
+            QTimer.singleShot(0, lambda: self._on_metadata_loaded(count))
         except Exception as exc:
             import traceback; traceback.print_exc()
-            self.after(0, self._on_metadata_load_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_metadata_load_fail(exc_msg))
 
     def _on_metadata_loaded(self, count: int):
         self._stop_progress()
-        self.filter_btn.configure(state="normal",
-                                   text="⚙ Configure Filters & Load Metadata")
-        self.cache_lbl.configure(text="Metadata freshly loaded.", text_color="#27ae60")
+        self.filter_btn.setEnabled(True)
+        self.filter_btn.setText("⚙ Configure Filters && Load Metadata")
+        self.cache_lbl.setText("Metadata freshly loaded.")
+        self.cache_lbl.setStyleSheet("color: #27ae60; font-size: 10px; padding: 0 16px; background: transparent;")
         self._update_filter_summary()
         n_de = len((self._metadata or {}).get("data_elements", []))
         self._set_status(f"Metadata loaded — {n_de} data elements.")
@@ -713,14 +925,14 @@ class AppWindow(ctk.CTk):
 
     def _on_metadata_load_fail(self, msg: str):
         self._stop_progress()
-        self.filter_btn.configure(state="normal",
-                                   text="⚙ Configure Filters & Load Metadata")
+        self.filter_btn.setEnabled(True)
+        self.filter_btn.setText("⚙ Configure Filters && Load Metadata")
         self._set_status(f"Metadata load failed: {msg}", error=True)
 
     def _update_filter_summary(self):
         cfg = self._filter_cfg
         if not cfg:
-            self.filter_summary_lbl.configure(text="")
+            self.filter_summary_lbl.setText("")
             return
         parts = []
         if cfg.get("indicator_group_ids"):
@@ -733,13 +945,15 @@ class AppWindow(ctk.CTk):
         if kws:
             parts.append(f"keywords: {', '.join(kws)}")
         if parts:
-            self.filter_summary_lbl.configure(
-                text="Filters: " + " | ".join(parts),
-                text_color="#f39c12")
+            self.filter_summary_lbl.setText("Filters: " + " | ".join(parts))
+            self.filter_summary_lbl.setStyleSheet(
+                "color: #f39c12; font-size: 10px; padding: 0 16px; background: transparent;"
+            )
         else:
-            self.filter_summary_lbl.configure(
-                text="No filters — all metadata loaded",
-                text_color="#8aa3b8")
+            self.filter_summary_lbl.setText("No filters — all metadata loaded")
+            self.filter_summary_lbl.setStyleSheet(
+                "color: #8aa3b8; font-size: 10px; padding: 0 16px; background: transparent;"
+            )
 
     # ─── Metadata Selector ───────────────────────────────────────────────────
 
@@ -749,12 +963,12 @@ class AppWindow(ctk.CTk):
             return
 
         from dhis2.usage_tracker import get_counts
-        url    = self.url_entry.get().strip()
+        url    = self.url_entry.text().strip()
         counts = get_counts(url)
 
         from ui.metadata_selector import MetadataSelector
         sel = MetadataSelector(self, self._metadata, counts, self._pinned)
-        self.wait_window(sel)
+        sel.exec()
 
         if sel.result is not None:
             self._pinned = sel.result
@@ -766,7 +980,8 @@ class AppWindow(ctk.CTk):
             return
         total = sum(len(v) for v in self._pinned.values())
         if total == 0:
-            self.pin_count_lbl.configure(text="No items pinned", text_color="#8aa3b8")
+            self.pin_count_lbl.setText("No items pinned")
+            self.pin_count_lbl.setStyleSheet("color: #8aa3b8;")
         else:
             parts = []
             labels = {"data_elements": "DE", "program_stage_data_elements": "stage DE", "tracked_entity_attributes": "TEA"}
@@ -774,9 +989,8 @@ class AppWindow(ctk.CTk):
                 n = len(self._pinned.get(k, []))
                 if n:
                     parts.append(f"{n} {short}")
-            self.pin_count_lbl.configure(
-                text="★ Pinned: " + ", ".join(parts),
-                text_color=DHIS2_BLUE)
+            self.pin_count_lbl.setText("★ Pinned: " + ", ".join(parts))
+            self.pin_count_lbl.setStyleSheet(f"color: {DHIS2_BLUE};")
 
     # ─── Dashboard Builder ───────────────────────────────────────────────────
 
@@ -787,7 +1001,7 @@ class AppWindow(ctk.CTk):
         from ui.dashboard_builder import DashboardBuilder
         existing = self._dashboard_layout  # pass existing layout to edit
         dlg = DashboardBuilder(self, self._metadata, self._pinned, existing)
-        self.wait_window(dlg)
+        dlg.exec()
         if dlg.result is not None:
             self._dashboard_layout = dlg.result
             self._invalidate_ctx_caches()
@@ -803,7 +1017,7 @@ class AppWindow(ctk.CTk):
         from ui.dashboard_builder import DashboardBuilder
         dlg = DashboardBuilder(self, self._metadata, self._pinned,
                                copy.deepcopy(self._last_generated_layout))
-        self.wait_window(dlg)
+        dlg.exec()
         if dlg.result is None:
             return  # cancelled
 
@@ -821,12 +1035,14 @@ class AppWindow(ctk.CTk):
                 self._set_status("No cards changed — layout updated.")
                 return
             n_changed = len(changed_ids)
-            if msgbox.askyesno(
-                "Regenerate",
+            reply = QMessageBox.question(
+                self, "Regenerate",
                 f"{n_changed} card(s) changed.\n\n"
                 f"Yes  → Regenerate only changed card(s) — faster\n"
                 f"No   → Regenerate entire dashboard",
-            ):
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
                 self._regenerate_changed_cards(new_layout, changed_ids)
                 return
 
@@ -835,7 +1051,7 @@ class AppWindow(ctk.CTk):
 
     def _regenerate_changed_cards(self, new_layout: list[dict], changed_ids: set[str]):
         """Regenerate only the changed cards and splice them into the existing HTML."""
-        api_key = self.apikey_entry.get().strip()
+        api_key = self.apikey_entry.text().strip()
         if not api_key:
             self._set_status("Enter Anthropic API key.", error=True)
             return
@@ -844,7 +1060,9 @@ class AppWindow(ctk.CTk):
             return
 
         n = len(changed_ids)
-        self.generate_btn.configure(state="disabled", text="Regenerating…")
+        if self.generate_btn:
+            self.generate_btn.setEnabled(False)
+            self.generate_btn.setText("Regenerating…")
         self._set_status(f"Regenerating {n} card(s)…")
         self._start_progress()
 
@@ -864,7 +1082,7 @@ class AppWindow(ctk.CTk):
             )
             from dhis2.usage_tracker import get_counts
 
-            url    = self.url_entry.get().strip()
+            url    = self.url_entry.text().strip()
             counts = get_counts(url)
             merged = _merge_pinned(new_layout, self._pinned)
             context = build_context(self._metadata or {}, url,
@@ -886,26 +1104,29 @@ class AppWindow(ctk.CTk):
                 if cid not in changed_ids:
                     continue
                 chart_idx, bs = card_info.get(cid, (1, 6))
-                self.after(0, self._set_status, f"Regenerating card {chart_idx}…")
+                QTimer.singleShot(0, lambda i=chart_idx: self._set_status(f"Regenerating card {i}…"))
                 fragment = regenerate_single_card(card, chart_idx, context, bs,
                                                   api_key=api_key, model=model)
                 try:
                     html = splice_card_in_html(html, cid, fragment)
                 except ValueError:
                     # Markers not found — fall back to full regen silently
-                    self.after(0, self._set_status,
-                               "Edit markers missing — regenerating full dashboard…")
-                    self.after(0, self._on_generate)
+                    QTimer.singleShot(0, lambda: self._set_status(
+                        "Edit markers missing — regenerating full dashboard…"))
+                    QTimer.singleShot(0, self._on_generate)
                     return
 
-            self.after(0, self._on_regen_cards_done, html, new_layout)
+            QTimer.singleShot(0, lambda h=html: self._on_regen_cards_done(h, new_layout))
 
         except Exception as exc:
-            self.after(0, self._on_generate_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_generate_fail(exc_msg))
 
     def _on_regen_cards_done(self, html: str, new_layout: list[dict]):
         self._stop_progress()
-        self.generate_btn.configure(state="normal", text="Generate from chat ▶")
+        if self.generate_btn:
+            self.generate_btn.setEnabled(True)
+            self.generate_btn.setText("Generate from chat ▶")
         self.report_view.show(html)
         self._last_generated_layout = copy.deepcopy(new_layout)
         self.report_view.set_edit_callback(self._on_edit_dashboard)
@@ -919,7 +1140,7 @@ class AppWindow(ctk.CTk):
         if self._dashboard_layout and len(self._dashboard_layout) == 1:
             current = self._dashboard_layout[0].get("template_id")
         lib = ChartLibrary(self, current)
-        self.wait_window(lib)
+        lib.exec()
         if lib.result is not None:
             # Wrap single template as a minimal one-card layout
             from charts.templates import get_by_id
@@ -937,26 +1158,23 @@ class AppWindow(ctk.CTk):
     # ─── Generate ────────────────────────────────────────────────────────────
 
     def _on_generate(self):
-        api_key = self.apikey_entry.get().strip()
+        api_key = self.apikey_entry.text().strip()
         if not api_key:
             self._set_status("Enter your Anthropic API key.", error=True)
             return
 
         messages = self.chat_panel.get_messages()
         if not messages:
-            # Chat empty — delegate to form if it's visible
-            if self.quick_form.winfo_ismapped():
-                self.quick_form._on_generate_click()
-            else:
-                self._set_status("Enter a request in chat before generating.", error=True)
+            self._set_status("Enter a request in chat before generating.", error=True)
             return
 
-        self.generate_btn.configure(state="disabled", text="Generating…")
+        if self.generate_btn:
+            self.generate_btn.setEnabled(False)
+            self.generate_btn.setText("Generating…")
         self._set_status("Building context…")
         self._start_progress()
         self.report_view.clear()
         self.chat_panel.set_generating(True)
-        self.quick_form.grid_remove()
 
         model = self._get_model()
         scope = self.quick_form.get_scope()
@@ -967,7 +1185,7 @@ class AppWindow(ctk.CTk):
         try:
             from llm.context_builder import build_context, filter_metadata_by_scope
             from dhis2.usage_tracker import get_counts
-            url    = self.url_entry.get().strip()
+            url    = self.url_entry.text().strip()
             counts = get_counts(url)
             merged_pinned = _merge_pinned(self._dashboard_layout, self._pinned)
 
@@ -988,7 +1206,7 @@ class AppWindow(ctk.CTk):
                 # Lazy-load option sets only for DEs in scope
                 if self._client:
                     from dhis2.metadata import enrich_with_option_sets
-                    self.after(0, self._set_status, "Loading option sets…")
+                    QTimer.singleShot(0, lambda: self._set_status("Loading option sets…"))
                     enrich_with_option_sets(self._client, scoped_meta)
                 base_ctx = build_context(
                     scoped_meta, url, pinned=merged_pinned, usage_counts=counts)
@@ -997,7 +1215,7 @@ class AppWindow(ctk.CTk):
 
             # LLM filter — further compress to only what the conversation needs
             from llm.chat_generator import filter_metadata_context
-            self.after(0, self._set_status, "Filtering metadata to report scope…")
+            QTimer.singleShot(0, lambda: self._set_status("Filtering metadata to report scope…"))
             self._scoped_context = filter_metadata_context(messages, base_ctx, api_key)
 
             context = self._scoped_context
@@ -1009,7 +1227,7 @@ class AppWindow(ctk.CTk):
             if layout and len(layout) > 1:
                 from llm.dashboard_generator import generate_dashboard_html
                 n = len(layout)
-                self.after(0, self._set_status, f"Calling Claude to build {n}-chart dashboard…")
+                QTimer.singleShot(0, lambda: self._set_status(f"Calling Claude to build {n}-chart dashboard…"))
                 html = generate_dashboard_html(prompt, layout, context, api_key=api_key, model=model)
 
             elif layout and len(layout) == 1:
@@ -1018,32 +1236,35 @@ class AppWindow(ctk.CTk):
                 card = layout[0]
                 tmpl = get_by_id(card.get("template_id", ""))
                 if tmpl:
-                    self.after(0, self._set_status, f"Filling template '{tmpl['name']}' with Claude…")
+                    tmpl_name = tmpl["name"]
+                    QTimer.singleShot(0, lambda: self._set_status(f"Filling template '{tmpl_name}' with Claude…"))
                     html = generate_report_html(
                         prompt, context, api_key=api_key,
                         template_html=tmpl["html"], template_name=tmpl["name"],
                         model=model,
                     )
                 else:
-                    self.after(0, self._set_status, "Calling Claude to generate HTML…")
+                    QTimer.singleShot(0, lambda: self._set_status("Calling Claude to generate HTML…"))
                     html = generate_report_html(prompt, context, api_key=api_key, model=model)
 
             else:
                 from llm.chat_generator import generate_from_chat
-                self.after(0, self._set_status, "Calling Claude to generate HTML from chat…")
+                QTimer.singleShot(0, lambda: self._set_status("Calling Claude to generate HTML from chat…"))
                 html = generate_from_chat(messages, context, api_key, model=model)
 
-            self.after(0, self._on_generate_done, html)
+            QTimer.singleShot(0, lambda h=html: self._on_generate_done(h))
 
         except Exception as exc:
-            self.after(0, self._on_generate_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_generate_fail(exc_msg))
 
     def _on_generate_done(self, html: str):
         self._stop_progress()
-        self.generate_btn.configure(state="normal", text="Generate from chat ▶")
+        if self.generate_btn:
+            self.generate_btn.setEnabled(True)
+            self.generate_btn.setText("Generate from chat ▶")
         self.chat_panel.set_generating(False)
         self.report_view.show(html)
-        self.tabs.set("📄 Preview")
         # Auto-save for debugging
         try:
             from pathlib import Path
@@ -1071,7 +1292,9 @@ class AppWindow(ctk.CTk):
 
     def _on_generate_fail(self, msg: str):
         self._stop_progress()
-        self.generate_btn.configure(state="normal", text="Generate from chat ▶")
+        if self.generate_btn:
+            self.generate_btn.setEnabled(True)
+            self.generate_btn.setText("Generate from chat ▶")
         self.chat_panel.set_generating(False)
         self._set_status(f"Generation failed: {msg}", error=True)
 
@@ -1096,12 +1319,14 @@ class AppWindow(ctk.CTk):
 
         # Warn only if _files/ is still present after the CDN fix (unrecognised pattern)
         if "_files/" in html:
-            if not msgbox.askyesno(
-                "Warning: broken CDN links detected",
+            reply = QMessageBox.question(
+                self, "Warning: broken CDN links detected",
                 "The HTML still contains '_files/' references that could not be\n"
                 "auto-fixed. Bootstrap or Chart.js may not load in DHIS2.\n\n"
                 "Continue deploying anyway?",
-            ):
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
                 return
 
         self._set_status("Deploying to DHIS2…")
@@ -1117,15 +1342,16 @@ class AppWindow(ctk.CTk):
             html = fix_cdn_links(html)  # ensure CDN links are correct before deploying
             result = create_report(self._client, name, html)
             uid    = (result.get("response", {}).get("uid") or result.get("uid") or "")
-            base   = self.url_entry.get().strip()
+            base   = self.url_entry.text().strip()
             url    = report_url(base, uid) if uid else base
 
             # Record usage for pinned indicators
             record_usage(base, self._pinned)
 
-            self.after(0, self._on_deploy_done, name, uid, url)
+            QTimer.singleShot(0, lambda: self._on_deploy_done(name, uid, url))
         except Exception as exc:
-            self.after(0, self._on_deploy_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_deploy_fail(exc_msg))
 
     def _on_deploy_done(self, name: str, uid: str, url: str):
         self._stop_progress()
@@ -1133,8 +1359,12 @@ class AppWindow(ctk.CTk):
         # Refresh pin count label (usage counts updated)
         self._refresh_pin_count()
         import webbrowser
-        if msgbox.askyesno("Deploy successful",
-                           f"Report '{name}' created in DHIS2.\nUID: {uid}\n\nOpen in DHIS2 now?"):
+        reply = QMessageBox.question(
+            self, "Deploy successful",
+            f"Report '{name}' created in DHIS2.\nUID: {uid}\n\nOpen in DHIS2 now?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
             webbrowser.open(url)
 
     def _on_deploy_fail(self, msg: str):
@@ -1162,15 +1392,16 @@ class AppWindow(ctk.CTk):
             return  # don't overwrite an active conversation
         self.quick_form.set_metadata(self._metadata)
         # Restore last-used form values for this server
-        url = self.url_entry.get().strip()
+        url = self.url_entry.text().strip()
         if url:
             try:
                 from dhis2.de_preferences import load_form_state
                 self.quick_form.restore_state(load_form_state(url))
             except Exception:
                 pass
-        self.quick_form.grid()
-        self.generate_btn.configure(text="Generate Dashboard ▶")
+        self.quick_form.show()
+        if self.generate_btn:
+            self.generate_btn.setText("Generate Dashboard ▶")
         self.chat_panel.add_welcome_message(
             "Hello! Fill in the form below and click \"Build Request\" — "
             "or type directly in the chat.")
@@ -1178,7 +1409,7 @@ class AppWindow(ctk.CTk):
     def _on_form_generate(self, configs: list[dict],
                           scope: tuple, scope_text: str):
         """Called when user clicks 'Generate Dashboard' in the form panel."""
-        api_key = self.apikey_entry.get().strip()
+        api_key = self.apikey_entry.text().strip()
         if not api_key:
             self._set_status("Enter your Anthropic API key.", error=True)
             return
@@ -1187,7 +1418,7 @@ class AppWindow(ctk.CTk):
             return
 
         # Save form state
-        url = self.url_entry.get().strip()
+        url = self.url_entry.text().strip()
         if url:
             try:
                 from dhis2.de_preferences import save_form_state
@@ -1196,7 +1427,9 @@ class AppWindow(ctk.CTk):
                 pass
 
         analytics_params = self.quick_form.get_analytics_params()
-        self.generate_btn.configure(state="disabled", text="Generating…")
+        if self.generate_btn:
+            self.generate_btn.setEnabled(False)
+            self.generate_btn.setText("Generating…")
         self.report_view.clear()
         self._set_status(f"Generating {len(configs)}-chart dashboard…")
         self._start_progress()
@@ -1216,7 +1449,7 @@ class AppWindow(ctk.CTk):
             from llm.dashboard_generator import generate_from_chart_configs
             from dhis2.usage_tracker import get_counts
 
-            url    = self.url_entry.get().strip()
+            url    = self.url_entry.text().strip()
             counts = get_counts(url)
             merged = _merge_pinned(self._dashboard_layout, self._pinned)
 
@@ -1229,16 +1462,12 @@ class AppWindow(ctk.CTk):
             )
 
             # ── Lazy-fetch program stage DEs if missing ──────────────────────
-            # program_stage_data_elements is only fetched at startup when
-            # program_ids is in the filter config. If the user selected a
-            # program in the form that wasn't in the initial fetch, we need
-            # to fetch its DEs now so the dropdown and analytics work.
             if prog_name and self._client and not scoped_meta.get("program_stage_data_elements"):
                 prog_uid = next(
                     (p.get("id") for p in base_meta.get("programs", [])
                      if p.get("displayName") == prog_name), None)
                 if prog_uid:
-                    self.after(0, self._set_status, f"Loading data elements for {prog_name}…")
+                    QTimer.singleShot(0, lambda: self._set_status(f"Loading data elements for {prog_name}…"))
                     from dhis2.metadata import fetch_program_stage_data_elements
                     fresh_des = fetch_program_stage_data_elements(self._client, [prog_uid])
                     if fresh_des:
@@ -1253,7 +1482,7 @@ class AppWindow(ctk.CTk):
                         scoped_meta = filter_metadata_by_scope(
                             base_meta, prog_name, stage_names)
                         # Update form dropdowns on main thread
-                        self.after(0, self.quick_form.set_metadata, base_meta)
+                        QTimer.singleShot(0, lambda: self.quick_form.set_metadata(base_meta))
 
             # ── Backfill missing metric_uid from name match ──────────────────
             psde_by_name = {
@@ -1280,7 +1509,6 @@ class AppWindow(ctk.CTk):
             context = build_context(scoped_meta, url, pinned=merged, usage_counts=counts)
 
             # ── Enrich configs with program/stage UIDs for JS generation ────
-            # Data stays in DHIS2; the generated HTML fetches it at runtime.
             psde_list = scoped_meta.get("program_stage_data_elements", [])
             for c in configs:
                 de_uid = c.get("metric_uid", "")
@@ -1293,28 +1521,32 @@ class AppWindow(ctk.CTk):
                         c["program_name"] = psde_match.get("program", {}).get("displayName", "")
                         c["stage_name"]   = psde_match.get("stage",   {}).get("displayName", "")
 
-            self.after(0, self._set_status, "Calling Claude to build dashboard…")
+            QTimer.singleShot(0, lambda: self._set_status("Calling Claude to build dashboard…"))
             html = generate_from_chart_configs(
                 configs, context,
                 context_hint=scope_text,
                 analytics_params=analytics_params,
                 api_key=api_key, model=model)
-            self.after(0, self._on_form_generate_done, html)
+            QTimer.singleShot(0, lambda h=html: self._on_form_generate_done(h))
 
         except Exception as exc:
-            self.after(0, self._on_form_generate_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_form_generate_fail(exc_msg))
 
     def _on_form_generate_fail(self, msg: str):
         self._stop_progress()
-        self.generate_btn.configure(state="normal", text="Generate Dashboard ▶")
+        if self.generate_btn:
+            self.generate_btn.setEnabled(True)
+            self.generate_btn.setText("Generate Dashboard ▶")
         self._set_status(f"Generation failed: {msg}", error=True)
 
     def _on_form_generate_done(self, html: str):
         self._stop_progress()
-        self.generate_btn.configure(state="normal", text="Generate from chat ▶")
-        self.quick_form.grid_remove()
+        if self.generate_btn:
+            self.generate_btn.setEnabled(True)
+            self.generate_btn.setText("Generate from chat ▶")
+        self.quick_form.hide()
         self.report_view.show(html)
-        self.tabs.set("📄 Preview")
         try:
             from pathlib import Path
             from datetime import datetime
@@ -1333,7 +1565,7 @@ class AppWindow(ctk.CTk):
 
     def _on_chat_send(self, text: str):
         """Called when user sends a chat message."""
-        api_key = self.apikey_entry.get().strip()
+        api_key = self.apikey_entry.text().strip()
         current_html = self.report_view.get_html()
 
         if current_html:
@@ -1341,7 +1573,6 @@ class AppWindow(ctk.CTk):
             if not api_key:
                 self._set_status("Enter Anthropic API key to refine.", error=True)
                 return
-            self.tabs.set("💬 Chat")
             self.chat_panel.set_generating(True)
             self._start_progress()
             self._set_status("Refining report…")
@@ -1373,7 +1604,7 @@ class AppWindow(ctk.CTk):
             if self._summary_ctx is None:
                 from llm.context_builder import build_summary_context
                 from dhis2.usage_tracker import get_counts
-                url    = self.url_entry.get().strip()
+                url    = self.url_entry.text().strip()
                 counts = get_counts(url)
                 merged = _merge_pinned(self._dashboard_layout, self._pinned)
                 self._summary_ctx = build_summary_context(
@@ -1381,9 +1612,10 @@ class AppWindow(ctk.CTk):
 
             messages = self.chat_panel.get_messages()
             response = chat_plan(messages, self._summary_ctx, api_key, model=model)
-            self.after(0, self._on_chat_plan_done, response)
+            QTimer.singleShot(0, lambda r=response: self._on_chat_plan_done(r))
         except Exception as exc:
-            self.after(0, self._on_chat_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_chat_fail(exc_msg))
 
     def _on_chat_plan_done(self, response: str):
         self.chat_panel.set_generating(False)
@@ -1402,21 +1634,21 @@ class AppWindow(ctk.CTk):
             else:
                 from llm.context_builder import build_context
                 from dhis2.usage_tracker import get_counts
-                url    = self.url_entry.get().strip()
+                url    = self.url_entry.text().strip()
                 counts = get_counts(url)
                 merged = _merge_pinned(self._dashboard_layout, self._pinned)
                 context = build_context(self._metadata or {}, url, pinned=merged, usage_counts=counts)
 
             html = refine_from_chat(request, current_html, context, api_key, model=model)
-            self.after(0, self._on_refine_done, html)
+            QTimer.singleShot(0, lambda h=html: self._on_refine_done(h))
         except Exception as exc:
-            self.after(0, self._on_chat_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_chat_fail(exc_msg))
 
     def _on_refine_done(self, html: str):
         self._stop_progress()
         self.chat_panel.set_generating(False)
         self.report_view.show(html)
-        self.tabs.set("📄 Preview")
         self.chat_panel.add_system_note("HTML updated")
         self._set_status("Report refined. Preview or Deploy to DHIS2.")
         # Re-apply edit dashboard tracking if applicable
@@ -1444,8 +1676,8 @@ class AppWindow(ctk.CTk):
                     ids_found.add(uid)
 
         if not ids_found:
-            msgbox.showinfo(
-                "Verify DEs",
+            QMessageBox.information(
+                self, "Verify DEs",
                 "No analytics calls found in the HTML.\n"
                 "The report may use hardcoded sample data — check the prompt."
             )
@@ -1460,7 +1692,7 @@ class AppWindow(ctk.CTk):
         )
         id_to_name = {it.get("id"): it.get("displayName", "?") for it in all_items}
 
-        url = self.url_entry.get().strip()
+        url = self.url_entry.text().strip()
 
         # Load history before this run so we can show cumulative counts
         from dhis2.de_preferences import load_verify_log, save_verify_results
@@ -1500,7 +1732,7 @@ class AppWindow(ctk.CTk):
             )
         sections.append("Results saved — will warn if these UIDs appear in future reports.")
 
-        msgbox.showinfo("Verify DEs in Report", "\n\n".join(sections))
+        QMessageBox.information(self, "Verify DEs in Report", "\n\n".join(sections))
 
     # ─── Viz Builder callbacks ────────────────────────────────────────────────
 
@@ -1527,7 +1759,7 @@ class AppWindow(ctk.CTk):
         if not self._metadata:
             self._set_status("Connect to DHIS2 first.", error=True)
             return
-        api_key = self.apikey_entry.get().strip() or self._api_key
+        api_key = self.apikey_entry.text().strip() or self._api_key
         if not api_key:
             self._set_status("Enter Anthropic API key.", error=True)
             return
@@ -1575,7 +1807,7 @@ class AppWindow(ctk.CTk):
                 "notes":      config.get("ai_desc", ""),
             }
 
-            url = self.url_entry.get().strip()
+            url = self.url_entry.text().strip()
             analytics_params = {"base_url": url}
 
             html = generate_from_chart_configs(
@@ -1594,11 +1826,12 @@ class AppWindow(ctk.CTk):
             config["mode"] = "ai"
             config["html_path"] = str(out_path)
 
-            self.after(0, self._on_ai_generate_done, config, out_path)
+            QTimer.singleShot(0, lambda: self._on_ai_generate_done(config, out_path))
 
         except Exception as exc:
             import traceback; traceback.print_exc()
-            self.after(0, self._on_ai_generate_fail, str(exc))
+            exc_msg = str(exc)
+            QTimer.singleShot(0, lambda: self._on_ai_generate_fail(exc_msg))
 
     def _on_ai_generate_done(self, config: dict, html_path):
         self._stop_progress()
@@ -1620,7 +1853,7 @@ class AppWindow(ctk.CTk):
         from pathlib import Path
         from charts.fixed_templates import assemble_dashboard
 
-        fixed  = [c for c in cards if c.get("mode") != "ai"]
+        fixed    = [c for c in cards if c.get("mode") != "ai"]
         ai_paths = [c.get("html_path") for c in cards if c.get("mode") == "ai" and c.get("html_path")]
 
         title = "Dashboard"
@@ -1665,17 +1898,101 @@ class AppWindow(ctk.CTk):
             args=(report_name, html),
             daemon=True).start()
 
-    # ─── Helpers ─────────────────────────────────────────────────────────────
 
-    def _set_status(self, msg: str, error: bool = False):
-        color = "#e74c3c" if error else "#6b8299"
-        self.status_label.configure(text=msg, text_color=color)
+# ── Stub classes to prevent AttributeError in legacy callback chain ──────────
 
-    def _start_progress(self):
-        self.progress.configure(mode="indeterminate")
-        self.progress.start()
+class _ReportViewStub:
+    """Minimal stub so methods that call self.report_view.X() don't crash."""
+    _html: str = ""
+    _edit_cb = None
 
-    def _stop_progress(self):
-        self.progress.stop()
-        self.progress.configure(mode="determinate")
-        self.progress.set(1)
+    def get_html(self) -> str:
+        return self._html
+
+    def show(self, html: str):
+        self._html = html
+
+    def clear(self):
+        self._html = ""
+
+    def get_report_name(self) -> str:
+        return ""
+
+    def focus_report_name(self):
+        pass
+
+    def set_edit_callback(self, cb):
+        self._edit_cb = cb
+
+
+class _ChatPanelStub:
+    """Minimal stub for chat_panel references."""
+    _messages: list = []
+
+    def get_messages(self) -> list:
+        return list(self._messages)
+
+    def set_generating(self, state: bool):
+        pass
+
+    def add_system_note(self, text: str):
+        pass
+
+    def add_assistant_message(self, text: str):
+        pass
+
+    def add_welcome_message(self, text: str):
+        pass
+
+    def set_hint(self, text: str):
+        pass
+
+    def clear(self):
+        self._messages = []
+
+
+class _QuickFormStub:
+    """Minimal stub for quick_form references."""
+
+    def get_scope(self) -> tuple:
+        return ("", "")
+
+    def get_analytics_params(self) -> dict:
+        return {}
+
+    def get_state(self) -> dict:
+        return {}
+
+    def set_metadata(self, metadata: dict):
+        pass
+
+    def restore_state(self, state: dict):
+        pass
+
+    def reset(self):
+        pass
+
+    def show(self):
+        pass
+
+    def hide(self):
+        pass
+
+    def winfo_ismapped(self) -> bool:
+        return False
+
+    def grid_remove(self):
+        pass
+
+    def grid(self):
+        pass
+
+    def _on_generate_click(self):
+        pass
+
+
+class _TabsStub:
+    """Minimal stub for self.tabs.set() calls."""
+
+    def set(self, value: str):
+        pass

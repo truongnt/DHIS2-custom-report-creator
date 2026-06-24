@@ -111,10 +111,6 @@ class BarPlugin(ChartPlugin):
 
         # ── Load fixture sample data (replaces hardcoded demo arrays) ────────
         fx = _load_fixture_sample(config)
-        import sys as _sys_bar
-        _fx_summary = {k: (len(v) if isinstance(v, list) else v) for k, v in fx.items()}
-        print(f"[BAR.build_js] has_dim={has_dim} dim_is_opt={dim_is_opt} all_agg={all_agg} "
-              f"stack={_po(po,'stack_mode','None')} fx_keys={_fx_summary}", file=_sys_bar.stderr)
 
         # ── Org Unit X Axis ──────────────────────────────────────────────────
         if x_axis == "Org Unit":
@@ -125,28 +121,22 @@ class BarPlugin(ChartPlugin):
         # ── Period X Axis (default) ──────────────────────────────────────────
         # Pass full fx to all sample functions; each decides based on stack_mode
         if has_dim and dim_is_opt:
-            print(f"[BAR.build_js] → route: dim+opt", file=_sys_bar.stderr)
             sample_js = _sample_js_dim(n, po, color_scheme, **fx)
             real_js   = _real_js_dim(n, config, metrics, dim_de, po, color_scheme)
         elif all_agg and metrics:
-            print(f"[BAR.build_js] → route: all_agg", file=_sys_bar.stderr)
             sample_js = _sample_js(n, po, color_scheme, **fx)
             real_js   = _real_js_agg(n, config, metrics, po, color_scheme)
         elif len(metrics) == 1:
-            print(f"[BAR.build_js] → route: single_tracker", file=_sys_bar.stderr)
             m = metrics[0]
             sample_js = _sample_js(n, po, color_scheme, **fx)
-            print(f"[BAR.build_js] _sample_js done, len={len(sample_js)}", file=_sys_bar.stderr)
             if m.get("type") == "tracker_numeric":
                 real_js = _real_js_single_tracker(n, config, m, po, color_scheme)
             else:
                 real_js = _real_js_agg(n, config, [m], po, color_scheme)
         else:
-            print(f"[BAR.build_js] → route: mixed", file=_sys_bar.stderr)
             sample_js = _sample_js(n, po, color_scheme, **fx)
             real_js   = _real_js_mixed(n, config, metrics, po, color_scheme)
 
-        print(f"[BAR.build_js] DONE total_len={len(sample_js)+len(real_js)}", file=_sys_bar.stderr)
         return sample_js + "\n" + real_js
 
 

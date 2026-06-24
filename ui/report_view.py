@@ -1,12 +1,14 @@
-import customtkinter as ctk
-import tkinter as tk
 import tempfile, os, webbrowser
 
-BORDER     = "#d0dde8"
-DHIS2_BLUE = "#1a6fa8"
+from PySide6.QtWidgets import (
+    QFrame, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QTextEdit, QPushButton, QApplication, QSizePolicy,
+)
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QFont, QColor, QPalette
 
 
-class ReportView(ctk.CTkFrame):
+class ReportView(QFrame):
     """
     Shows the generated HTML source and provides:
       - Preview in Browser
@@ -16,17 +18,21 @@ class ReportView(ctk.CTkFrame):
     Report name is entered here — required before deploy.
     """
 
-    def __init__(self, master, **kwargs):
-        super().__init__(master, fg_color="white", corner_radius=8,
-                         border_width=1, border_color=BORDER, **kwargs)
-        self.grid_rowconfigure(2, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "ReportView { background: white; border: 1px solid #d0dde8; border-radius: 8px; }"
+        )
 
         self._html: str | None = None
-        self._deploy_cb  = None
-        self._verify_cb  = None
-        self._edit_cb    = None
+        self._deploy_cb = None
+        self._verify_cb = None
+        self._edit_cb = None
+
         self._build()
+
+    # ─── Public API ──────────────────────────────────────────────────────────
 
     def set_deploy_callback(self, cb):
         self._deploy_cb = cb
@@ -37,159 +43,204 @@ class ReportView(ctk.CTkFrame):
     def set_edit_callback(self, cb):
         self._edit_cb = cb
         if cb:
-            self._edit_btn.grid()
+            self._edit_btn.setVisible(True)
         else:
-            self._edit_btn.grid_remove()
+            self._edit_btn.setVisible(False)
 
     def get_report_name(self) -> str:
-        return self._name_entry.get().strip()
+        return self._name_entry.text().strip()
 
     def focus_report_name(self):
-        self._name_entry.focus_set()
+        self._name_entry.setFocus()
+
+    def show(self, html: str):
+        self._html = html
+        self._code_box.setPlainText(html)
+
+        self._empty_lbl.setVisible(False)
+        self._code_box.setVisible(True)
+        self._preview_btn.setVisible(True)
+        self._copy_btn.setVisible(True)
+        self._deploy_bar.setVisible(True)
+        # Edit button visibility is controlled by set_edit_callback; only show
+        # it here if a callback was already registered.
+        if self._edit_cb:
+            self._edit_btn.setVisible(True)
+
+    def clear(self):
+        self._html = None
+        self._code_box.setPlainText("")
+        self._code_box.setVisible(False)
+        self._preview_btn.setVisible(False)
+        self._copy_btn.setVisible(False)
+        self._edit_btn.setVisible(False)
+        self._deploy_bar.setVisible(False)
+        self._empty_lbl.setVisible(True)
+
+    def get_html(self) -> str | None:
+        return self._html
 
     # ─── Layout ──────────────────────────────────────────────────────────────
 
     def _build(self):
-        # ── Row 0: action toolbar ──
-        toolbar = ctk.CTkFrame(self, fg_color="#f0f4f8", corner_radius=0,
-                               border_width=0, height=44)
-        toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.grid_propagate(False)
-        toolbar.grid_columnconfigure(3, weight=1)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        ctk.CTkLabel(
-            toolbar, text="Generated HTML Report",
-            font=ctk.CTkFont(size=12, weight="bold"), text_color="#1e2d3d",
-        ).grid(row=0, column=0, padx=16, pady=10, sticky="w")
+        # ── Row 0: action toolbar ─────────────────────────────────────────────
+        toolbar = QFrame()
+        toolbar.setFixedHeight(44)
+        toolbar.setStyleSheet("background: #f0f4f8; border: none;")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(16, 0, 8, 0)
+        toolbar_layout.setSpacing(8)
 
-        self._preview_btn = ctk.CTkButton(
-            toolbar, text="Preview in Browser", width=140, height=28,
-            fg_color="transparent", border_width=1, border_color=DHIS2_BLUE,
-            text_color=DHIS2_BLUE, hover_color="#e8f0f8",
-            command=self._on_preview,
+        title_lbl = QLabel("Generated HTML Report")
+        title_lbl.setStyleSheet(
+            "color: #1e2d3d; font-size: 12px; font-weight: bold; background: transparent;"
         )
-        self._preview_btn.grid(row=0, column=1, padx=(0, 8), pady=8)
+        toolbar_layout.addWidget(title_lbl)
+        toolbar_layout.addStretch(1)
 
-        self._copy_btn = ctk.CTkButton(
-            toolbar, text="Copy HTML", width=100, height=28,
-            fg_color="transparent", border_width=1, border_color="#8aa3b8",
-            text_color="#4a6278", hover_color="#e8f0f8",
-            command=self._on_copy,
+        self._preview_btn = QPushButton("Preview in Browser")
+        self._preview_btn.setFixedHeight(28)
+        self._preview_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent; border: 1px solid #1a6fa8;"
+            "  color: #1a6fa8; border-radius: 4px; padding: 0 10px; font-size: 11px;"
+            "}"
+            "QPushButton:hover { background: #e8f0f8; }"
         )
-        self._copy_btn.grid(row=0, column=2, padx=(0, 8), pady=8)
+        self._preview_btn.clicked.connect(self._on_preview)
+        toolbar_layout.addWidget(self._preview_btn)
 
-        self._edit_btn = ctk.CTkButton(
-            toolbar, text="✏ Edit Dashboard", width=140, height=28,
-            fg_color="transparent", border_width=1, border_color="#f39c12",
-            text_color="#f39c12", hover_color="#fff8e8",
-            command=self._on_edit,
+        self._copy_btn = QPushButton("Copy HTML")
+        self._copy_btn.setFixedHeight(28)
+        self._copy_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent; border: 1px solid #8aa3b8;"
+            "  color: #4a6278; border-radius: 4px; padding: 0 10px; font-size: 11px;"
+            "}"
+            "QPushButton:hover { background: #e8f0f8; }"
         )
-        self._edit_btn.grid(row=0, column=4, padx=(0, 8), pady=8, sticky="e")
+        self._copy_btn.clicked.connect(self._on_copy)
+        toolbar_layout.addWidget(self._copy_btn)
 
-        # Hide until HTML ready
-        self._preview_btn.grid_remove()
-        self._copy_btn.grid_remove()
-        self._edit_btn.grid_remove()
-
-        # ── Row 1: deploy bar (name + verify + deploy) ──
-        deploy_bar = ctk.CTkFrame(self, fg_color="#e8f4ec", corner_radius=0,
-                                  border_width=0, height=40)
-        deploy_bar.grid(row=1, column=0, sticky="ew")
-        deploy_bar.grid_propagate(False)
-        deploy_bar.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            deploy_bar, text="Report name:",
-            font=ctk.CTkFont(size=11), text_color="#2d6a3f",
-        ).grid(row=0, column=0, padx=(14, 6), pady=8, sticky="w")
-
-        self._name_entry = ctk.CTkEntry(
-            deploy_bar,
-            placeholder_text="Enter report name… (required to deploy)",
-            height=28, font=ctk.CTkFont(size=11),
+        self._edit_btn = QPushButton("✏ Edit Dashboard")
+        self._edit_btn.setFixedHeight(28)
+        self._edit_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent; border: 1px solid #f39c12;"
+            "  color: #f39c12; border-radius: 4px; padding: 0 10px; font-size: 11px;"
+            "}"
+            "QPushButton:hover { background: #fff8e8; }"
         )
-        self._name_entry.grid(row=0, column=1, padx=(0, 10), pady=6, sticky="ew")
+        self._edit_btn.clicked.connect(self._on_edit)
+        toolbar_layout.addWidget(self._edit_btn)
 
-        self._verify_btn = ctk.CTkButton(
-            deploy_bar, text="🔍 Verify DEs", width=130, height=28,
-            fg_color="transparent", border_width=1, border_color="#2d8a5f",
-            text_color="#2d6a3f", hover_color="#d4edda",
-            font=ctk.CTkFont(size=11),
-            command=self._on_verify,
+        # Hide until HTML is ready / callback registered
+        self._preview_btn.setVisible(False)
+        self._copy_btn.setVisible(False)
+        self._edit_btn.setVisible(False)
+
+        root.addWidget(toolbar)
+
+        # ── Row 1: deploy bar ─────────────────────────────────────────────────
+        deploy_bar = QFrame()
+        deploy_bar.setFixedHeight(40)
+        deploy_bar.setStyleSheet("background: #e8f4ec; border: none;")
+        deploy_layout = QHBoxLayout(deploy_bar)
+        deploy_layout.setContentsMargins(14, 0, 14, 0)
+        deploy_layout.setSpacing(8)
+
+        name_lbl = QLabel("Report name:")
+        name_lbl.setStyleSheet(
+            "color: #2d6a3f; font-size: 11px; background: transparent;"
         )
-        self._verify_btn.grid(row=0, column=2, padx=(0, 8), pady=6)
+        deploy_layout.addWidget(name_lbl)
 
-        self._deploy_btn = ctk.CTkButton(
-            deploy_bar, text="Deploy to DHIS2 ▲", width=155, height=28,
-            fg_color="#27ae60", hover_color="#1e8449",
-            font=ctk.CTkFont(size=11),
-            command=self._on_deploy,
+        self._name_entry = QLineEdit()
+        self._name_entry.setPlaceholderText("Enter report name… (required to deploy)")
+        self._name_entry.setFixedHeight(28)
+        self._name_entry.setStyleSheet(
+            "QLineEdit { font-size: 11px; border: 1px solid #b0ccb8;"
+            "  border-radius: 4px; padding: 0 6px; background: white; }"
         )
-        self._deploy_btn.grid(row=0, column=3, padx=(0, 14), pady=6)
+        deploy_layout.addWidget(self._name_entry, 1)
 
-        # Hide deploy bar until HTML ready
-        deploy_bar.grid_remove()
+        self._verify_btn = QPushButton("\U0001f50d Verify DEs")
+        self._verify_btn.setFixedHeight(28)
+        self._verify_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent; border: 1px solid #2d8a5f;"
+            "  color: #2d6a3f; border-radius: 4px; padding: 0 10px; font-size: 11px;"
+            "}"
+            "QPushButton:hover { background: #d4edda; }"
+        )
+        self._verify_btn.clicked.connect(self._on_verify)
+        deploy_layout.addWidget(self._verify_btn)
+
+        self._deploy_btn = QPushButton("Deploy to DHIS2 ▲")
+        self._deploy_btn.setFixedHeight(28)
+        self._deploy_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: #27ae60; color: white; border: none;"
+            "  border-radius: 4px; padding: 0 14px; font-size: 11px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #1e8449; }"
+        )
+        self._deploy_btn.clicked.connect(self._on_deploy)
+        deploy_layout.addWidget(self._deploy_btn)
+
+        # Hide deploy bar until HTML is ready
+        deploy_bar.setVisible(False)
         self._deploy_bar = deploy_bar
 
-        # ── Row 2: HTML source textbox ──
-        self._code_box = ctk.CTkTextbox(
-            self,
-            font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color="#1e1e2e",
-            text_color="#cdd6f4",
-            border_width=0,
-            corner_radius=0,
-            wrap="none",
+        root.addWidget(deploy_bar)
+
+        # ── Row 2: HTML source text box ───────────────────────────────────────
+        self._code_box = QTextEdit()
+        self._code_box.setReadOnly(True)
+        self._code_box.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        code_font = QFont("Consolas", 11)
+        code_font.setStyleHint(QFont.StyleHint.Monospace)
+        self._code_box.setFont(code_font)
+        self._code_box.setStyleSheet(
+            "QTextEdit {"
+            "  background: #1e1e2e; color: #cdd6f4;"
+            "  border: none; border-radius: 0;"
+            "}"
         )
-        self._code_box.grid(row=2, column=0, sticky="nsew")
-        self._code_box.configure(state="disabled")
-
-        # ── Empty state ──
-        self._empty_lbl = ctk.CTkLabel(
-            self,
-            text="The HTML report will appear here after Generate.\n"
-                 "You can then Preview and Deploy to DHIS2.",
-            font=ctk.CTkFont(size=12),
-            text_color="#b0c0d0",
-            justify="center",
+        self._code_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._empty_lbl.grid(row=2, column=0)
+        self._code_box.setVisible(False)
+        root.addWidget(self._code_box, 1)
 
-    # ─── Public API ──────────────────────────────────────────────────────────
-
-    def show(self, html: str):
-        self._html = html
-        self._code_box.configure(state="normal")
-        self._code_box.delete("1.0", "end")
-        self._code_box.insert("1.0", html)
-        self._code_box.configure(state="disabled")
-
-        self._empty_lbl.grid_remove()
-        self._preview_btn.grid()
-        self._copy_btn.grid()
-        self._deploy_bar.grid()
-
-    def clear(self):
-        self._html = None
-        self._code_box.configure(state="normal")
-        self._code_box.delete("1.0", "end")
-        self._code_box.configure(state="disabled")
-        self._preview_btn.grid_remove()
-        self._copy_btn.grid_remove()
-        self._edit_btn.grid_remove()
-        self._deploy_bar.grid_remove()
-        self._empty_lbl.grid()
-
-    def get_html(self) -> str | None:
-        return self._html
+        # ── Empty state label ─────────────────────────────────────────────────
+        self._empty_lbl = QLabel(
+            "The HTML report will appear here after Generate.\n"
+            "You can then Preview and Deploy to DHIS2."
+        )
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setStyleSheet(
+            "color: #b0c0d0; font-size: 12px; background: transparent;"
+        )
+        self._empty_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        root.addWidget(self._empty_lbl, 1)
 
     # ─── Actions ─────────────────────────────────────────────────────────────
 
     def _on_preview(self):
         if not self._html:
             return
-        from llm.html_utils import fix_cdn_links
-        html = fix_cdn_links(self._html)
+        try:
+            from llm.html_utils import fix_cdn_links
+            html = fix_cdn_links(self._html)
+        except ImportError:
+            html = self._html
         tmp = tempfile.NamedTemporaryFile(
             delete=False, suffix=".html", mode="w", encoding="utf-8"
         )
@@ -200,10 +251,9 @@ class ReportView(ctk.CTkFrame):
     def _on_copy(self):
         if not self._html:
             return
-        self.clipboard_clear()
-        self.clipboard_append(self._html)
-        self._copy_btn.configure(text="Copied ✓")
-        self.after(2000, lambda: self._copy_btn.configure(text="Copy HTML"))
+        QApplication.clipboard().setText(self._html)
+        self._copy_btn.setText("Copied ✓")
+        QTimer.singleShot(2000, lambda: self._copy_btn.setText("Copy HTML"))
 
     def _on_edit(self):
         if self._edit_cb:

@@ -1,9 +1,13 @@
-import customtkinter as ctk
+import sys
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
 from ui.app_window import AppWindow
-
-ctk.set_appearance_mode("light")
-ctk.set_default_color_theme("blue")
+from ui.qt_utils import APP_QSS
 
 if __name__ == "__main__":
-    app = AppWindow()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    app.setApplicationName("DHIS2 Auto Report")
+    app.setStyleSheet(APP_QSS)
+    window = AppWindow()
+    window.show()
+    sys.exit(app.exec())

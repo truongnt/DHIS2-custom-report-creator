@@ -1,27 +1,35 @@
-"""Multi-turn chat widget for the Auto Report app."""
-import customtkinter as ctk
-import tkinter as tk
+"""Multi-turn chat widget for the Auto Report app — PySide6 version."""
+from PySide6.QtWidgets import (
+    QFrame, QWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
+    QHBoxLayout, QVBoxLayout, QSizePolicy,
+)
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QTextCursor, QColor
 
 DHIS2_BLUE = "#1a6fa8"
 
 
-class ChatPanel(ctk.CTkFrame):
+class ChatPanel(QFrame):
     """
     Multi-turn chat widget.
     Stores messages as list[dict] with role/content.
     set_send_callback(cb) — called with (text: str) when user sends.
     """
 
-    def __init__(self, master, **kwargs):
-        super().__init__(master, fg_color="white", corner_radius=8,
-                         border_width=1, border_color="#d0dde8", **kwargs)
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.setFrameShape(QFrame.Shape.Box)
+        self.setLineWidth(1)
+        self.setStyleSheet(
+            "ChatPanel { border: 1px solid #d0dde8; border-radius: 8px; background: white; }"
+        )
+
         self._messages: list[dict] = []
         self._send_cb = None
         self._clear_cb = None
         self._generating = False
         self._locked = False
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
+
         self._build()
 
     # ── Public API ──────────────────────────────────────────────────────────
@@ -54,115 +62,150 @@ class ChatPanel(ctk.CTkFrame):
 
     def clear(self):
         self._messages.clear()
-        self._txt.configure(state="normal")
-        self._txt.delete("1.0", "end")
-        self._txt.configure(state="disabled")
+        self._txt.clear()
 
     def set_locked(self, locked: bool):
         """Lock input entirely (not connected). Different from set_generating."""
         self._locked = locked
         if locked:
-            self._entry.configure(state="disabled",
-                                  placeholder_text="Connect to DHIS2 first to get started…")
-            self._send_btn.configure(state="disabled", text="Send ↵")
+            self._entry.setEnabled(False)
+            self._entry.setPlaceholderText("Connect to DHIS2 first to get started…")
+            self._send_btn.setEnabled(False)
+            self._send_btn.setText("Send ↵")
         else:
-            self._entry.configure(state="normal",
-                                  placeholder_text="Enter your request or question…")
-            self._send_btn.configure(state="normal", text="Send ↵")
+            self._entry.setEnabled(True)
+            self._entry.setPlaceholderText("Enter your request or question…")
+            self._send_btn.setEnabled(True)
+            self._send_btn.setText("Send ↵")
 
     def set_generating(self, flag: bool):
         self._generating = flag
-        state = "disabled" if flag else "normal"
-        self._entry.configure(state=state)
-        self._send_btn.configure(state=state, text="…" if flag else "Send ↵")
+        enabled = not flag
+        self._entry.setEnabled(enabled)
+        self._send_btn.setEnabled(enabled)
+        self._send_btn.setText("…" if flag else "Send ↵")
 
     def set_hint(self, text: str):
-        self._hint_lbl.configure(text=text)
+        self._hint_lbl.setText(text)
 
     # ── Build ────────────────────────────────────────────────────────────────
 
     def _build(self):
-        # Header row
-        hdr = ctk.CTkFrame(self, fg_color="#f0f4f8", corner_radius=0, height=34)
-        hdr.grid(row=0, column=0, sticky="ew")
-        hdr.grid_propagate(False)
-        hdr.grid_columnconfigure(1, weight=1)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        ctk.CTkLabel(hdr, text="💬 Chat",
-                     font=ctk.CTkFont(size=12, weight="bold"),
-                     text_color="#1e2d3d").grid(row=0, column=0, padx=12, pady=6, sticky="w")
-
-        self._hint_lbl = ctk.CTkLabel(
-            hdr, text="Describe your report → click Generate",
-            font=ctk.CTkFont(size=10), text_color="#8aa3b8")
-        self._hint_lbl.grid(row=0, column=1, padx=6, sticky="w")
-
-        ctk.CTkButton(
-            hdr, text="Clear", width=46, height=22,
-            fg_color="transparent", border_width=1, border_color="#c8d8e8",
-            text_color="#6b8299", hover_color="#e8f0f8",
-            font=ctk.CTkFont(size=10),
-            command=self._on_xoa_click,
-        ).grid(row=0, column=2, padx=8, pady=6, sticky="e")
-
-        # Chat display — tk.Text with tag-based coloring
-        txt_frame = tk.Frame(self, bg="#f8fbff")
-        txt_frame.grid(row=1, column=0, sticky="nsew")
-        txt_frame.grid_rowconfigure(0, weight=1)
-        txt_frame.grid_columnconfigure(0, weight=1)
-
-        self._txt = tk.Text(
-            txt_frame,
-            state="disabled",
-            bg="#f8fbff",
-            relief="flat",
-            font=("Segoe UI", 11),
-            wrap="word",
-            bd=0,
-            padx=10,
-            pady=6,
-            cursor="arrow",
-            selectbackground="#dbeafe",
+        # ── Header bar ──────────────────────────────────────────────────────
+        hdr = QFrame()
+        hdr.setFixedHeight(34)
+        hdr.setStyleSheet(
+            "QFrame { background: #f0f4f8; border: none; border-radius: 0px; }"
         )
-        self._txt.grid(row=0, column=0, sticky="nsew")
+        hdr_layout = QHBoxLayout(hdr)
+        hdr_layout.setContentsMargins(12, 0, 8, 0)
+        hdr_layout.setSpacing(6)
 
-        sb = tk.Scrollbar(txt_frame, command=self._txt.yview, width=10)
-        sb.grid(row=0, column=1, sticky="ns")
-        self._txt.configure(yscrollcommand=sb.set)
-
-        # Tags
-        self._txt.tag_configure("user_prefix",
-            foreground=DHIS2_BLUE, font=("Segoe UI", 10, "bold"))
-        self._txt.tag_configure("user_body",
-            foreground="#1e2d3d", lmargin1=14, lmargin2=14)
-        self._txt.tag_configure("asst_prefix",
-            foreground="#374151", font=("Segoe UI", 10, "bold"))
-        self._txt.tag_configure("asst_body",
-            foreground="#374151", lmargin1=14, lmargin2=14)
-        self._txt.tag_configure("note",
-            foreground="#8aa3b8", font=("Segoe UI", 9, "italic"),
-            justify="center")
-
-        # Input row
-        inp = ctk.CTkFrame(self, fg_color="#f0f4f8", corner_radius=0, height=42)
-        inp.grid(row=2, column=0, sticky="ew")
-        inp.grid_propagate(False)
-        inp.grid_columnconfigure(0, weight=1)
-
-        self._entry = ctk.CTkEntry(
-            inp, placeholder_text="Enter your request or question…",
-            font=ctk.CTkFont(size=12), height=30,
+        title_lbl = QLabel("💬 Chat")
+        title_lbl.setStyleSheet(
+            "font-size: 12px; font-weight: bold; color: #1e2d3d; background: transparent;"
         )
-        self._entry.grid(row=0, column=0, padx=(10, 6), pady=6, sticky="ew")
-        self._entry.bind("<Return>", lambda e: self._on_send())
 
-        self._send_btn = ctk.CTkButton(
-            inp, text="Send ↵", width=78, height=30,
-            fg_color=DHIS2_BLUE, hover_color="#155a8a",
-            font=ctk.CTkFont(size=12),
-            command=self._on_send,
+        self._hint_lbl = QLabel("Describe your report → click Generate")
+        self._hint_lbl.setStyleSheet(
+            "font-size: 10px; color: #8aa3b8; background: transparent;"
         )
-        self._send_btn.grid(row=0, column=1, padx=(0, 10), pady=6)
+        self._hint_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedSize(46, 22)
+        clear_btn.setStyleSheet(
+            "QPushButton {"
+            "  font-size: 10px; color: #6b8299;"
+            "  background: transparent;"
+            "  border: 1px solid #c8d8e8;"
+            "  border-radius: 4px;"
+            "}"
+            "QPushButton:hover { background: #e8f0f8; }"
+        )
+        clear_btn.clicked.connect(self._on_xoa_click)
+
+        hdr_layout.addWidget(title_lbl)
+        hdr_layout.addWidget(self._hint_lbl)
+        hdr_layout.addWidget(clear_btn)
+
+        root_layout.addWidget(hdr)
+
+        # ── Chat display ─────────────────────────────────────────────────────
+        self._txt = QTextEdit()
+        self._txt.setReadOnly(True)
+        self._txt.setStyleSheet(
+            "QTextEdit {"
+            "  background: #f8fbff;"
+            "  border: none;"
+            "  font-family: 'Segoe UI', sans-serif;"
+            "  font-size: 11px;"
+            "  padding: 6px 10px;"
+            "}"
+            "QScrollBar:vertical {"
+            "  width: 10px; background: #f0f4f8;"
+            "}"
+            "QScrollBar::handle:vertical {"
+            "  background: #c8d8e8; border-radius: 4px; min-height: 20px;"
+            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self._txt.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        root_layout.addWidget(self._txt, stretch=1)
+
+        # ── Input bar ────────────────────────────────────────────────────────
+        inp = QFrame()
+        inp.setFixedHeight(42)
+        inp.setStyleSheet(
+            "QFrame { background: #f0f4f8; border: none; }"
+        )
+        inp_layout = QHBoxLayout(inp)
+        inp_layout.setContentsMargins(10, 6, 10, 6)
+        inp_layout.setSpacing(6)
+
+        self._entry = QLineEdit()
+        self._entry.setPlaceholderText("Enter your request or question…")
+        self._entry.setFixedHeight(30)
+        self._entry.setStyleSheet(
+            "QLineEdit {"
+            "  font-size: 12px;"
+            "  border: 1px solid #c8d8e8;"
+            "  border-radius: 4px;"
+            "  padding: 0 8px;"
+            "  background: white;"
+            "}"
+            "QLineEdit:focus { border-color: #1a6fa8; }"
+            "QLineEdit:disabled { background: #eef2f6; color: #aab8c4; }"
+        )
+        self._entry.returnPressed.connect(self._on_send)
+
+        self._send_btn = QPushButton("Send ↵")
+        self._send_btn.setFixedSize(78, 30)
+        self._send_btn.setStyleSheet(
+            "QPushButton {"
+            f"  background: {DHIS2_BLUE};"
+            "  color: white;"
+            "  font-size: 12px;"
+            "  border: none;"
+            "  border-radius: 4px;"
+            "}"
+            "QPushButton:hover { background: #155a8a; }"
+            "QPushButton:disabled { background: #8ab8d8; color: #d0e8f4; }"
+        )
+        self._send_btn.clicked.connect(self._on_send)
+
+        inp_layout.addWidget(self._entry)
+        inp_layout.addWidget(self._send_btn)
+
+        root_layout.addWidget(inp)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
@@ -173,23 +216,56 @@ class ChatPanel(ctk.CTkFrame):
             self.clear()
 
     def _on_send(self):
-        text = self._entry.get().strip()
+        text = self._entry.text().strip()
         if not text or self._generating or self._locked:
             return
-        self._entry.delete(0, "end")
+        self._entry.clear()
         self.add_user_message(text)
         if self._send_cb:
             self._send_cb(text)
 
     def _append(self, text: str, kind: str):
-        self._txt.configure(state="normal")
+        cursor = self._txt.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._txt.setTextCursor(cursor)
+
         if kind == "note":
-            self._txt.insert("end", f"\n— {text} —\n", "note")
+            self._txt.insertHtml(
+                "<div style='"
+                "  text-align: center;"
+                "  color: #8aa3b8;"
+                "  font-size: 9px;"
+                "  font-style: italic;"
+                "  margin: 4px 0;"
+                f"'>&#8212; {self._escape(text)} &#8212;</div>"
+            )
         elif kind == "user":
-            self._txt.insert("end", "\nYou:  ", "user_prefix")
-            self._txt.insert("end", text + "\n", "user_body")
-        else:
-            self._txt.insert("end", "\nClaude:  ", "asst_prefix")
-            self._txt.insert("end", text + "\n", "asst_body")
-        self._txt.configure(state="disabled")
-        self._txt.see("end")
+            self._txt.insertHtml(
+                "<div style='margin: 6px 0 2px 0;'>"
+                f"<span style='color: {DHIS2_BLUE}; font-weight: bold; font-size: 10px;'>You:&nbsp;&nbsp;</span>"
+                f"<span style='color: #1e2d3d; font-size: 11px;'>{self._escape(text)}</span>"
+                "</div>"
+            )
+        else:  # asst
+            self._txt.insertHtml(
+                "<div style='margin: 6px 0 2px 0;'>"
+                "<span style='color: #374151; font-weight: bold; font-size: 10px;'>Claude:&nbsp;&nbsp;</span>"
+                f"<span style='color: #374151; font-size: 11px;'>{self._escape(text)}</span>"
+                "</div>"
+            )
+
+        # Auto-scroll to bottom
+        scrollbar = self._txt.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    @staticmethod
+    def _escape(text: str) -> str:
+        """Minimal HTML escaping for safe insertHtml use."""
+        return (
+            text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("\n", "<br>")
+        )
