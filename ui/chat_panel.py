@@ -17,7 +17,9 @@ class ChatPanel(ctk.CTkFrame):
                          border_width=1, border_color="#d0dde8", **kwargs)
         self._messages: list[dict] = []
         self._send_cb = None
+        self._clear_cb = None
         self._generating = False
+        self._locked = False
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
         self._build()
@@ -26,6 +28,10 @@ class ChatPanel(ctk.CTkFrame):
 
     def set_send_callback(self, cb):
         self._send_cb = cb
+
+    def set_clear_callback(self, cb):
+        """Called when user clicks the 'Clear' button — app can run cleanup + show template."""
+        self._clear_cb = cb
 
     def add_user_message(self, text: str):
         self._messages.append({"role": "user", "content": text})
@@ -39,6 +45,10 @@ class ChatPanel(ctk.CTkFrame):
         """Non-LLM note (e.g. 'HTML generated') — NOT added to messages list."""
         self._append(text, "note")
 
+    def add_welcome_message(self, text: str):
+        """Display assistant-styled welcome/template — NOT added to messages list."""
+        self._append(text, "asst")
+
     def get_messages(self) -> list[dict]:
         return list(self._messages)
 
@@ -48,11 +58,23 @@ class ChatPanel(ctk.CTkFrame):
         self._txt.delete("1.0", "end")
         self._txt.configure(state="disabled")
 
+    def set_locked(self, locked: bool):
+        """Lock input entirely (not connected). Different from set_generating."""
+        self._locked = locked
+        if locked:
+            self._entry.configure(state="disabled",
+                                  placeholder_text="Connect to DHIS2 first to get started…")
+            self._send_btn.configure(state="disabled", text="Send ↵")
+        else:
+            self._entry.configure(state="normal",
+                                  placeholder_text="Enter your request or question…")
+            self._send_btn.configure(state="normal", text="Send ↵")
+
     def set_generating(self, flag: bool):
         self._generating = flag
         state = "disabled" if flag else "normal"
         self._entry.configure(state=state)
-        self._send_btn.configure(state=state, text="…" if flag else "Gửi ↵")
+        self._send_btn.configure(state=state, text="…" if flag else "Send ↵")
 
     def set_hint(self, text: str):
         self._hint_lbl.configure(text=text)
@@ -71,16 +93,16 @@ class ChatPanel(ctk.CTkFrame):
                      text_color="#1e2d3d").grid(row=0, column=0, padx=12, pady=6, sticky="w")
 
         self._hint_lbl = ctk.CTkLabel(
-            hdr, text="Mô tả báo cáo → nhấn Generate",
+            hdr, text="Describe your report → click Generate",
             font=ctk.CTkFont(size=10), text_color="#8aa3b8")
         self._hint_lbl.grid(row=0, column=1, padx=6, sticky="w")
 
         ctk.CTkButton(
-            hdr, text="Xóa", width=46, height=22,
+            hdr, text="Clear", width=46, height=22,
             fg_color="transparent", border_width=1, border_color="#c8d8e8",
             text_color="#6b8299", hover_color="#e8f0f8",
             font=ctk.CTkFont(size=10),
-            command=self.clear,
+            command=self._on_xoa_click,
         ).grid(row=0, column=2, padx=8, pady=6, sticky="e")
 
         # Chat display — tk.Text with tag-based coloring
@@ -128,14 +150,14 @@ class ChatPanel(ctk.CTkFrame):
         inp.grid_columnconfigure(0, weight=1)
 
         self._entry = ctk.CTkEntry(
-            inp, placeholder_text="Nhập yêu cầu hoặc câu hỏi…",
+            inp, placeholder_text="Enter your request or question…",
             font=ctk.CTkFont(size=12), height=30,
         )
         self._entry.grid(row=0, column=0, padx=(10, 6), pady=6, sticky="ew")
         self._entry.bind("<Return>", lambda e: self._on_send())
 
         self._send_btn = ctk.CTkButton(
-            inp, text="Gửi ↵", width=78, height=30,
+            inp, text="Send ↵", width=78, height=30,
             fg_color=DHIS2_BLUE, hover_color="#155a8a",
             font=ctk.CTkFont(size=12),
             command=self._on_send,
@@ -144,9 +166,15 @@ class ChatPanel(ctk.CTkFrame):
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
+    def _on_xoa_click(self):
+        if self._clear_cb:
+            self._clear_cb()  # delegate entirely to app_window._on_clear
+        else:
+            self.clear()
+
     def _on_send(self):
         text = self._entry.get().strip()
-        if not text or self._generating:
+        if not text or self._generating or self._locked:
             return
         self._entry.delete(0, "end")
         self.add_user_message(text)
@@ -158,7 +186,7 @@ class ChatPanel(ctk.CTkFrame):
         if kind == "note":
             self._txt.insert("end", f"\n— {text} —\n", "note")
         elif kind == "user":
-            self._txt.insert("end", "\nBạn:  ", "user_prefix")
+            self._txt.insert("end", "\nYou:  ", "user_prefix")
             self._txt.insert("end", text + "\n", "user_body")
         else:
             self._txt.insert("end", "\nClaude:  ", "asst_prefix")

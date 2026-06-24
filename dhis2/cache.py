@@ -68,3 +68,23 @@ def clear(base_url: str) -> None:
 
 def cache_exists(base_url: str) -> bool:
     return _cache_path(base_url).exists()
+
+
+def _filter_cfg_path(base_url: str) -> Path:
+    return _CACHE_ROOT / _url_slug(base_url) / "filter_cfg.json"
+
+
+def save_filter_cfg(base_url: str, cfg: dict) -> None:
+    path = _filter_cfg_path(base_url)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_filter_cfg(base_url: str) -> dict:
+    path = _filter_cfg_path(base_url)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}

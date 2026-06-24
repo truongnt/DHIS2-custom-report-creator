@@ -17,9 +17,9 @@ PIN_COLOR  = "#e8f4fd"
 BORDER     = "#d0dde8"
 
 _TABS = [
-    ("indicators",         "Indicators"),
-    ("program_indicators", "Program Indicators"),
-    ("data_elements",      "Data Elements"),
+    ("data_elements",              "Aggregate DEs"),
+    ("program_stage_data_elements","Stage Data Elements"),
+    ("tracked_entity_attributes",  "TEA / Attributes"),
 ]
 
 
@@ -27,10 +27,10 @@ class MetadataSelector(ctk.CTkToplevel):
     def __init__(self, parent, metadata: dict, usage_counts: dict, pinned: dict):
         super().__init__(parent)
         self.title("Select & Pin Metadata for Report")
-        self.geometry("1000x680")
         self.minsize(800, 500)
         self.grab_set()          # modal
         self.focus_force()
+        self.after(0, lambda: self.state("zoomed"))
 
         self._metadata    = metadata
         self._usage       = usage_counts
@@ -204,10 +204,9 @@ class MetadataSelector(ctk.CTkToplevel):
             uid   = item.get("id", "")
             name  = item.get("displayName", "")
             count = counts.get(uid, 0)
-            if kind == "indicators":
-                extra = item.get("indicatorType", {}).get("displayName", "")
-            elif kind == "program_indicators":
-                extra = item.get("program", {}).get("displayName", "")
+            if kind == "program_stage_data_elements":
+                extra = (item.get("program", {}).get("displayName", "") + " / "
+                         + item.get("stage", {}).get("displayName", ""))
             else:
                 extra = item.get("valueType", "")
             rows.append((count, uid, name, extra))

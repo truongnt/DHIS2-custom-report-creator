@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Malaria Case Register — Classification</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    body {
+      background: #f5f5f5;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .dashboard-header {
+      background: linear-gradient(135deg, #1a6fa8 0%, #0d47a1 100%);
+      color: white;
+      padding: 20px;
+      margin-bottom: 0;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .dashboard-header h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 600;
+    }
+    .dashboard-header p {
+      margin: 4px 0 0 0;
+      font-size: 13px;
+      opacity: 0.9;
+    }
+    #controls {
+      background: #f0f4f8;
+      border-bottom: 1px solid #d0dde8;
+      padding: 10px 20px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    #controls label {
+      font-weight: 600;
+      margin: 0;
+      font-size: 13px;
+      color: #333;
+    }
+    #controls select, #controls button {
+      font-size: 13px;
+    }
+    #controls select {
+      padding: 4px 8px;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+      background: white;
+      color: #333;
+    }
+    #controls button {
+      padding: 5px 16px;
+      background: #1a6fa8;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    #controls button:hover:not(:disabled) {
+      background: #0d47a1;
+    }
+    #controls button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    #lastUpdated {
+      font-size: 11px;
+      color: #6c757d;
+      margin-left: 8px;
+    }
+    .chart-container {
+      background: white;
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .chart-container h5 {
+      margin: 0 0 12px 0;
+      font-size: 15px;
+      font-weight: 600;
+      color: #333;
+    }
+    .demo-banner {
+      background: #fff3cd;
+      color: #856404;
+      border: 1px solid #ffc107;
+      border-radius: 4px;
+      padding: 3px 10px;
+      font-size: 11px;
+      margin-bottom: 6px;
+      text-align: center;
+      display: none;
+    }
+    canvas {
+      max-height: 400px;
+    }
+    .dashboard-content {
+      padding: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="dashboard-header">
+  <h1>Malaria Case Register — Classification</h1>
+  <p>Stage: 2. Investigation & Classification • Monthly trend over 12 months</p>
+</div>
+
+<div id="controls">
+  <label>Org unit:</label>
+  <select id="ouSelect"></select>
+  <label>Period:</label>
+  <select id="peSelect"></select>
+  <button id="loadBtn" onclick="loadData()">↻ Load data</button>
+  <span id="lastUpdated"></span>
+</div>
+
+<div class="dashboard-content">
+  <div class="row">
+    <!-- CARD-START:chart-classification -->
+    <div class="col-md-12">
+      <div class="chart-container">
+        <h5>Classification — Monthly Breakdown (Stacked)</h5>
+        <div id="demoBanner1" class="demo-banner">⚠ Sample data — DHIS2 not connected</div>
+        <div id="loading1" style="text-align:center;color:#999;display:none;">Loading...</div>
+        <canvas id="chart1" style="display:none;"></canvas>
+      </div>
+    </div>
+    <script>
+      const PREVIEW = window.location.protocol === 'file:';
+      const OU_LEVEL = 2;
+
+      async function dhis2Get(path) {
+        const url = '../' + path;
+        const r = await fetch(url, {credentials:'include'});
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + url);
+        return r.json();
+      }
+
+      function resolveRelativePeriod(pe) {
+        const now = new Date(), y = now.getFullYear(), m = now.getMonth() + 1;
+        const pad = n => String(n).padStart(2, '0');
+        const prevMonth = i => { let mo = m - i, yr = y; while (mo <= 0) { mo += 12; yr--; } return yr + pad(mo); };
+        const q = Math.ceil(m / 3);
+        switch (pe) {
+          case 'LAST_MONTH':     return prevMonth(1);
+          case 'LAST_3_MONTHS':  return [1,2,3].map(prevMonth).join(';');
+          case 'LAST_6_MONTHS':  return [1,2,3,4,5,6].map(prevMonth).join(';');
+          case 'LAST_12_MONTHS': return [1,2,3,4,5,6,7,8,9,10,11,12].map(prevMonth).join(';');
+          case 'THIS_QUARTER':   return y + 'Q' + q;
+          case 'LAST_QUARTER':   { let lq = q-1, yr = y; if (lq<=0){lq=4;yr--;} return yr+'Q'+lq; }
+          case 'THIS_YEAR':      return String(y);
+          case 'LAST_YEAR':      return String(y - 1);
+          default:               return pe;
+        }
+      }
+
+      async function loadOrgUnits() {
+        const sel = document.getElementById('ouSelect');
+        sel.innerHTML = '';
+        const scopeGrp = document.createElement('optgroup');
+        scopeGrp.label = 'User organisation unit';
+        [['User organisation unit',  'USER_ORGUNIT'],
+         ['User sub-units',          'USER_ORGUNIT_CHILDREN'],
+         ['User sub-x2-units',       'USER_ORGUNIT_GRANDCHILDREN'],
+        ].forEach(([l, v]) => scopeGrp.appendChild(new Option(l, v)));
+        sel.appendChild(scopeGrp);
+        sel.value = 'USER_ORGUNIT';
+        try {
+          const me = await dhis2Get('api/me.json?fields=organisationUnits[id,displayName,level]');
+          const myOUs = (me.organisationUnits || []).sort((a, b) => a.displayName.localeCompare(b.displayName));
+          if (myOUs.length > 0) {
+            const myGrp = document.createElement('optgroup');
+            myGrp.label = 'Org units';
+            myOUs.forEach(o => myGrp.appendChild(new Option(o.displayName, o.id)));
+            sel.appendChild(myGrp);
+          }
+          const roots = myOUs.filter(o => o.level < OU_LEVEL);
+          if (roots.length > 0) {
+            let url = 'api/organisationUnits.json?fields=id,displayName&level=' + OU_LEVEL + '&paging=false';
+            if (roots.length === 1) url += '&filter=path:like:' + roots[0].id;
+            const d = await dhis2Get(url);
+            const lvlOUs = (d.organisationUnits || []).sort((a, b) => a.displayName.localeCompare(b.displayName));
+            if (lvlOUs.length > 0) {
+              const lvlGrp = document.createElement('optgroup');
+              lvlGrp.label = 'Level ' + OU_LEVEL + ' (specific)';
+              lvlOUs.forEach(o => lvlGrp.appendChild(new Option(o.displayName, o.id)));
+              sel.appendChild(lvlGrp);
+            }
+          }
+        } catch(e) {
+          console.error('[DHIS2]', e);
+        }
+      }
+
+      function generatePeriods() {
+        const sel = document.getElementById('peSelect');
+        sel.innerHTML = '';
+        const rel = document.createElement('optgroup');
+        rel.label = 'Relative';
+        [['Last month',     'LAST_MONTH'],
+         ['Last 3 months',  'LAST_3_MONTHS'],
+         ['Last 6 months',  'LAST_6_MONTHS'],
+         ['Last 12 months', 'LAST_12_MONTHS'],
+         ['This quarter',   'THIS_QUARTER'],
+         ['Last quarter',   'LAST_QUARTER'],
+         ['This year',      'THIS_YEAR'],
+         ['Last year',      'LAST_YEAR'],
+        ].forEach(([l, v]) => rel.appendChild(new Option(l, v)));
+        sel.appendChild(rel);
+        const mfix = document.createElement('optgroup');
+        mfix.label = 'Monthly';
+        const now = new Date(), y = now.getFullYear(), m = now.getMonth() + 1;
+        for (let i = 0; i < 12; i++) {
+          let mo = m - i, yr = y;
+          if (mo <= 0) { mo += 12; yr--; }
+          mfix.appendChild(new Option('Month ' + mo + '/' + yr, yr + String(mo).padStart(2, '0')));
+        }
+        sel.appendChild(mfix);
+        const qfix = document.createElement('optgroup');
+        qfix.label = 'Quarterly';
+        for (let i = 0; i < 8; i++) {
+          let q = Math.ceil(m / 3) - i, yr = y;
+          if (q <= 0) { q += 4; yr--; }
+          qfix.appendChild(new Option('Q' + q + ' ' + yr, yr + 'Q' + q));
+        }
+        sel.appendChild(qfix);
+        const yfix = document.createElement('optgroup');
+        yfix.label = 'Yearly';
+        for (let yr = y; yr >= y - 4; yr--) yfix.appendChild(new Option(String(yr), String(yr)));
+        sel.appendChild(yfix);
+        sel.value = 'LAST_12_MONTHS';
+      }
+
+      function renderChart1Sample(cvs) {
+        const ctx = cvs.getContext('2d');
+        if (window.chart1Instance) window.chart1Instance.destroy();
+        window.chart1Instance = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: ['Month 1', 'Month 2', 'Month 3', 'Month 4', 'Month 5', 'Month 6',
+                     'Month 7', 'Month 8', 'Month 9', 'Month 10', 'Month 11', 'Month 12'],
+            datasets: [
+              {
+                label: 'Confirmed Pf',
+                backgroundColor: '#d32f2f',
+                data: [15, 22, 18, 25, 20, 28, 32, 26, 24, 30, 35, 28]
+              },
+              {
+                label: 'Confirmed Pv',
+                backgroundColor: '#f57c00',
+                data: [8, 12, 10, 14, 11, 16, 18, 14, 13, 17, 19, 15]
+              },
+              {
+                label: 'Mixed',
+                backgroundColor: '#388e3c',
+                data: [3, 5, 4, 6, 5, 7, 8, 6, 5, 7, 8, 6]
+              },
+              {
+                label: 'Negative',
+                backgroundColor: '#1976d2',
+                data: [2, 3, 2, 4, 3, 5, 6, 4, 3, 5, 6, 4]
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            indexAxis: undefined,
+            scales: {
+              x: { stacked: true },
+              y: { stacked: true, beginAtZero: true }
+            },
+            plugins: {
+              title: { display: false },
+              legend: { position: 'bottom', labels: { font: { size: 12 }, padding: 12 } },
+              tooltip: { mode: 'index', intersect: false }
+            }
+          }
+        });
+      }
+
+      function renderChart1Real(cvs, data) {
+        const ctx = cvs.getContext('2d');
+        if (window.chart1Instance) window.chart1Instance.destroy();
+
+        // Parse event aggregate response
+        // Columns: [diF3G0zxOMF, pe, ou, value]
+        const byPeriod = {};
+        const classifications = new Set();
+        (data.rows || []).forEach(row => {
+          const [classif, period, ou, value] = row;
+          classifications.add(classif || 'Unknown');
+          if (!byPeriod[period]) byPeriod[period] = {};
+          byPeriod[period][classif || 'Unknown'] = parseInt(value) || 0;
+        });
+
+        const sortedPeriods = Object.keys(byPeriod).sort();
+        const classifArray = Array.from(classifications).sort();
+        const colorMap = {
+          'Confirmed Pf': '#d32f2f',
+          'Confirmed Pv': '#f57c00',
+          'Mixed': '#388e3c',
+          'Negative': '#1976d2',
+          'Unknown': '#9e9e9e'
+        };
+
+        const datasets = classifArray.map(c => ({
+          label: c,
+          backgroundColor: colorMap[c] || '#757575',
+          data: sortedPeriods.map(p => byPeriod[p][c] || 0)
+        }));
+
+        window.chart1Instance = new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: sortedPeriods,
+            datasets: datasets
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: true,
+            indexAxis: undefined,
+            scales: {
+              x: { stacked: true },
+              y: { stacked: true, beginAtZero: true }
+            },
+            plugins: {
+              title: { display: false },
+              legend: { position: 'bottom', labels: { font: { size: 12 }, padding: 12 } },
+              tooltip: { mode: 'index', intersect: false }
+            }
+          }
+        });
+      }
+
+      async function initChart1(ou, pe) {
+        document.getElementById('loading1').style.display = 'none';
+        const cvs = document.getElementById('chart1');
+        cvs.style.display = 'block';
+
+        if (PREVIEW) {
+          document.getElementById('demoBanner1').style.display = 'block';
+          renderChart1Sample(cvs);
+          return;
+        }
+
+        try {
+          const rpe = resolveRelativePeriod(pe);
+          const url = 'api/analytics/events/aggregate/yAKTrPUMAuU?stage=Tz0gwnPTKsa&dimension=pe:' + encodeURIComponent(rpe) +
+                      '&dimension=ou:' + encodeURIComponent(ou) + '&dimension=Tz0gwnPTKsa.diF3G0zxOMF&aggregationType=COUNT';
+          const d = await dhis2Get(url);
+          if (!d.rows || d.rows.length === 0) throw new Error('no-data');
+          document.getElementById('demoBanner1').style.display = 'none';
+          renderChart1Real(cvs, d);
+        } catch(e) {
+          console.error('[Chart1]', e);
+          document.getElementById('demoBanner1').style.display = 'block';
+          renderChart1Sample(cvs);
+        }
+      }
+
+      async function loadData() {
+        const ou = document.getElementById('ouSelect').value;
+        const pe = document.getElementById('peSelect').value;
+        const btn = document.getElementById('loadBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳ Loading...';
+        try {
+          await initChart1(ou, pe);
+          document.getElementById('lastUpdated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '↻ Load data';
+        }
+      }
+
+      document.addEventListener('DOMContentLoaded', async () => {
+        generatePeriods();
+        if (PREVIEW) {
+          const sel = document.getElementById('ouSelect');
+          [['User organisation unit',  'USER_ORGUNIT'],
+           ['User sub-units',          'USER_ORGUNIT_CHILDREN'],
+           ['User sub-x2-units',       'USER_ORGUNIT_GRANDCHILDREN'],
+          ].forEach(([l, v]) => sel.appendChild(new Option(l, v)));
+          sel.value = 'USER_ORGUNIT';
+          await loadData();
+          return;
+        }
+        try {
+          await loadOrgUnits();
+          await loadData();
+        } catch(e) {
+          console.error('Init error:', e);
+        }
+      });
+    </script>
+    <!-- CARD-END:chart-classification -->
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+</body>
+</html>

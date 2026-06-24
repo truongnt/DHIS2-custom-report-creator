@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Malaria Case Register Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    body {
+      background: #f5f7fa;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    }
+    .dashboard-header {
+      background: linear-gradient(135deg, #1a6fa8 0%, #0d4a73 100%);
+      color: #fff;
+      padding: 20px;
+      margin-bottom: 15px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    .dashboard-header h1 {
+      font-size: 28px;
+      margin: 0;
+      font-weight: 600;
+    }
+    .dashboard-header p {
+      font-size: 13px;
+      margin: 5px 0 0 0;
+      opacity: 0.9;
+    }
+    #controls {
+      background: #f0f4f8;
+      border-bottom: 1px solid #d0dde8;
+      padding: 10px 20px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    }
+    #controls label {
+      font-weight: 600;
+      margin: 0;
+      font-size: 13px;
+      color: #333;
+    }
+    #controls select {
+      padding: 4px 8px;
+      border: 1px solid #ced4da;
+      border-radius: 4px;
+      font-size: 13px;
+      background: #fff;
+      cursor: pointer;
+    }
+    #controls button {
+      padding: 5px 16px;
+      background: #1a6fa8;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 0.3s ease;
+    }
+    #controls button:hover:not(:disabled) {
+      background: #0d4a73;
+    }
+    #controls button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    #lastUpdated {
+      font-size: 11px;
+      color: #6c757d;
+      margin-left: 8px;
+    }
+    .demo-banner {
+      background: #fff3cd;
+      color: #856404;
+      border: 1px solid #ffc107;
+      border-radius: 4px;
+      padding: 3px 10px;
+      font-size: 11px;
+      margin-bottom: 6px;
+      text-align: center;
+      display: none;
+    }
+    .chart-card {
+      background: #fff;
+      border: 1px solid #e0e6ed;
+      border-radius: 6px;
+      padding: 15px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }
+    .chart-card h5 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #1a6fa8;
+      margin: 0 0 10px 0;
+    }
+    .chart-container {
+      position: relative;
+      height: 350px;
+    }
+    canvas {
+      max-height: 350px;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard-header">
+    <h1>📊 Malaria Case Register Dashboard</h1>
+    <p>Stage: 1. Notification | Monthly tracking | Last 12 months</p>
+  </div>
+
+  <div id="controls">
+    <label>Org unit:</label>
+    <select id="ouSelect"></select>
+    <label>Period:</label>
+    <select id="peSelect"></select>
+    <button id="loadBtn" onclick="loadData()">↻ Load data</button>
+    <span id="lastUpdated"></span>
+  </div>
+
+  <div class="container-fluid" style="padding: 20px;">
+    <!-- CARD-START:chart1_malaria_cases_by_species -->
+    <div class="row">
+      <div class="col-md-12">
+        <div class="chart-card">
+          <h5>Number of Malaria Cases by Species</h5>
+          <div id="demoBanner1" class="demo-banner">⚠ Sample data — DHIS2 not connected</div>
+          <div id="loading1" style="text-align:center; padding:20px; display:none;">
+            <div class="spinner-border spinner-border-sm" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+          </div>
+          <div class="chart-container">
+            <canvas id="chart1" style="display:none;"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- CARD-END:chart1_malaria_cases_by_species -->
+
+    <script>
+      let chart1Inst = null;
+
+      function renderChart1Sample(cvs) {
+        if (chart1Inst) {
+          chart1Inst.destroy();
+          chart1Inst = null;
+        }
+
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        const data = {
+          labels: months,
+          datasets: [
+            {
+              label: 'P. falciparum',
+              data: [45, 52, 48, 61, 55, 72, 68, 59, 64, 71, 78, 82],
+              backgroundColor: '#e74c3c',
+              borderColor: '#c0392b',
+              borderWidth: 1
+            },
+            {
+              label: 'P. vivax',
+              data: [28, 32, 35, 42, 38, 48, 52, 45, 51, 58, 62, 68],
+              backgroundColor: '#3498db',
+              borderColor: '#2980b9',
+              borderWidth: 1
+            },
+            {
+              label: 'P. ovale',
+              data: [12, 14, 16, 18, 15, 22, 25, 19, 23, 28, 31, 35],
+              backgroundColor: '#f39c12',
+              borderColor: '#d68910',
+              borderWidth: 1
+            },
+            {
+              label: 'P. malariae',
+              data: [5, 6, 8, 10, 7, 12, 14, 11, 13, 16, 18, 20],
+              backgroundColor: '#27ae60',
+              borderColor: '#1e8449',
+              borderWidth: 1
+            }
+          ]
+        };
+
+        chart1Inst = new Chart(cvs.getContext('2d'), {
+          type: 'bar',
+          data: data,
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: {
+                display: true,
+                position: 'top',
+                labels: {
+                  usePointStyle: true,
+                  padding: 12,
+                  font: { size: 12 }
+                }
+              },
+              tooltip: {
+                backgroundColor: 'rgba(0,0,0,0.8)',
+                padding: 10,
+                titleFont: { size: 12, weight: 'bold' },
+                bodyFont: { size: 11 },
+                cornerRadius: 4
+              }
+            },
+            scales: {
+              x: {
+                stacked: true,
+                title: {
+                  display: true,
+                  text: 'Month',
+                  font: { size: 12, weight: 'bold' }
+                },
+                ticks: {
+                  font: { size: 11 }
+                },
+                grid: {
+                  display: false
+                }
+              },
+              y: {
+                stacked: true,
+                title: {
+                  display: true,
+                  text: 'Number of Cases',
+                  font: { size: 12, weight: 'bold' }
+                },
+                ticks: {
+                  font: { size: 11 },
+                  beginAtZero: true
+                },
+                grid: {
+                  color: 'rgba(0,0,0,0.05)'
+                }
+              }
+            }
+          }
+        });
+      }
+
+      function renderChart1Real(cvs, data) {
+        if (chart1Inst) {
+          chart1Inst.destroy();
+          chart1Inst = null;
+        }
+
+        if (!data.rows || data.rows.length === 0) {
+          renderChart1Sample(cvs);
+          return;
+        }
+
+        const speciesIndex = data.headers.findIndex(h => h.name === 'h86ikuTvjuP.qf5LcIDIXSJ');
+        const peIndex = data.headers.findIndex(h => h.name === 'pe');
+        const valueIndex = data.headers.findIndex(h => h.name === 'value');
+
+        if (speciesIndex === -1 || peIndex === -1 || valueIndex === -1) {
+          renderChart1Sample(cvs);
+          return;
+        }
+
+        const speciesMap = {};
+        const periodSet = new Set();
+
+        data.rows.forEach(row => {
+          const species = row[speciesIndex] || 'Unknown';
+          const period = row[peIndex];
+          const value = parseInt(row[valueIndex]) || 0;
+
+          if (!speciesMap[species]) {
+            speciesMap[species] = {};
+          }
+          speciesMap[species][period] = value;
+          periodSet.add(period);
+        });
+
+        const periods = Array.from(periodSet).sort();
+        const species = Object.keys(speciesMap).sort();
+
+        const colors = ['#e74c3c', '#3498db', '#f39c12', '#27ae60', '#9b59b6', '#1abc9c'];
+        const datasets = species.map((sp, idx) => ({
+          label: sp,
+          data: periods.map(p => speciesMap[sp][p] || 0),
+          backgroundColor: colors[idx % colors.length],
+          borderColor: colors[idx % colors.length],
+          borderWidth: 1
+        }));
+
+        chart1Inst = new Chart(cvs.getContext('2d'), {
+          type: 'bar',
+          data: {
+            labels: periods,
+            datasets: datasets
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: {
+                display: true,
+                position: 'top',
+                labels: {
+                  usePointStyle: true,
+                  padding: 12,
+                  font: { size: 12 }
+                }
+              },
+              tooltip: {
+                backgroundColor: 'rgba(0,0,0,0.8)',
+                padding: 10,
+                titleFont: { size: 12, weight: 'bold' },
+                bodyFont: { size: 11 },
+                cornerRadius: 4
+              }
+            },
+            scales: {
+              x: {
+                stacked: true,
+                title: {
+                  display: true,
+                  text: 'Period',
+                  font: { size: 12, weight: 'bold' }
+                },
+                ticks: {
+                  font: { size: 11 }
+                },
+                grid: {
+                  display: false
+                }
+              },
+              y: {
+                stacked: true,
+                title: {
+                  display: true,
+                  text: 'Number of Cases',
+                  font: { size: 12, weight: 'bold' }
+                },
+                ticks: {
+                  font: { size: 11 },
+                  beginAtZero: true
+                },
+                grid: {
+                  color: 'rgba(0,0,0,0.05)'
+                }
+              }
+            }
+          }
+        });
+      }
+
+      async function initChart1(ou, pe) {
+        document.getElementById('loading1').style.display = 'none';
+        const cvs = document.getElementById('chart1');
+        cvs.style.display = 'block';
+
+        if (PREVIEW) {
+          document.getElementById('demoBanner1').style.display = 'block';
+          renderChart1Sample(cvs);
+          return;
+        }
+
+        try {
+          const rpe = resolveRelativePeriod(pe);
+          const path = 'api/analytics/events/aggregate/yAKTrPUMAuU?stage=h86ikuTvjuP&dimension=h86ikuTvjuP.qf5LcIDIXSJ&dimension=pe:' + rpe + '&dimension=ou:' + ou;
+          const d = await dhis2Get(path);
+
+          if (!d.rows || d.rows.length === 0) {
+            throw new Error('no-data');
+          }
+
+          document.getElementById('demoBanner1').style.display = 'none';
+          renderChart1Real(cvs, d);
+        } catch (e) {
+          console.error('[Chart1]', e);
+          document.getElementById('demoBanner1').style.display = 'block';
+          renderChart1Sample(cvs);
+        }
+      }
+    </script>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    const PREVIEW = window.location.protocol === 'file:';
+    const OU_LEVEL = 2;
+
+    async function dhis2Get(path) {
+      const url = '../' + path;
+      const r = await fetch(url, { credentials: 'include' });
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + url);
+      return r.json();
+    }
+
+    function resolveRelativePeriod(pe) {
+      const now = new Date(), y = now.getFullYear(), m = now.getMonth() + 1;
+      const pad = n => String(n).padStart(2, '0');
+      const prevMonth = i => {
+        let mo = m - i, yr = y;
+        while (mo <= 0) {
+          mo += 12;
+          yr--;
+        }
+        return yr + pad(mo);
+      };
+      const q = Math.ceil(m / 3);
+      switch (pe) {
+        case 'LAST_MONTH':
+          return prevMonth(1);
+        case 'LAST_3_MONTHS':
+          return [1, 2, 3].map(prevMonth).join(';');
+        case 'LAST_6_MONTHS':
+          return [1, 2, 3, 4, 5, 6].map(prevMonth).join(';');
+        case 'LAST_12_MONTHS':
+          return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(prevMonth).join(';');
+        case 'THIS_QUARTER':
+          return y + 'Q' + q;
+        case 'LAST_QUARTER': {
+          let lq = q - 1, yr = y;
+          if (lq <= 0) {
+            lq = 4;
+            yr--;
+          }
+          return yr + 'Q' + lq;
+        }
+        case 'THIS_YEAR':
+          return String(y);
+        case 'LAST_YEAR':
+          return String(y - 1);
+        default:
+          return pe;
+      }
+    }
+
+    async function loadOrgUnits() {
+      const sel = document.getElementById('ouSelect');
+      sel.innerHTML = '';
+
+      const scopeGrp = document.createElement('optgroup');
+      scopeGrp.label = 'User organisation unit';
+      [
+        ['User organisation unit', 'USER_ORGUNIT'],
+        ['User sub-units', 'USER_ORGUNIT_CHILDREN'],
+        ['User sub-x2-units', 'USER_ORGUNIT_GRANDCHILDREN']
+      ].forEach(([l, v]) => scopeGrp.appendChild(new Option(l, v)));
+      sel.appendChild(scopeGrp);
+      sel.value = 'USER_ORGUNIT';
+
+      try {
+        const me = await dhis2Get('api/me.json?fields=organisationUnits[id,displayName,level]');
+        const myOUs = (me.organisationUnits || []).sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+        if (myOUs.length > 0) {
+          const myGrp = document.createElement('optgroup');
+          myGrp.label = 'Org units';
+          myOUs.forEach(o => myGrp.appendChild(new Option(o.displayName, o.id)));
+          sel.appendChild(myGrp);
+        }
+
+        const roots = myOUs.filter(o => o.level < OU_LEVEL);
+        if (roots.length > 0) {
+          let url = 'api/organisationUnits.json?fields=id,displayName&level=' + OU_LEVEL + '&paging=false';
+          if (roots.length === 1) url += '&filter=path:like:' + roots[0].id;
+          const d = await dhis2Get(url);
+          const lvlOUs = (d.organisationUnits || []).sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+          if (lvlOUs.length > 0) {
+            const lvlGrp = document.createElement('optgroup');
+            lvlGrp.label = 'Level ' + OU_LEVEL + ' (specific)';
+            lvlOUs.forEach(o => lvlGrp.appendChild(new Option(o.displayName, o.id)));
+            sel.appendChild(lvlGrp);
+          }
+        }
+      } catch (e) {
+        console.error('[DHIS2]', e);
+      }
+    }
+
+    function generatePeriods() {
+      const sel = document.getElementById('peSelect');
+      sel.innerHTML = '';
+
+      const rel = document.createElement('optgroup');
+      rel.label = 'Relative';
+      [
+        ['Last month', 'LAST_MONTH'],
+        ['Last 3 months', 'LAST_3_MONTHS'],
+        ['Last 6 months', 'LAST_6_MONTHS'],
+        ['Last 12 months', 'LAST_12_MONTHS'],
+        ['This quarter', 'THIS_QUARTER'],
+        ['Last quarter', 'LAST_QUARTER'],
+        ['This year', 'THIS_YEAR'],
+        ['Last year', 'LAST_YEAR']
+      ].forEach(([l, v]) => rel.appendChild(new Option(l, v)));
+      sel.appendChild(rel);
+
+      const mfix = document.createElement('optgroup');
+      mfix.label = 'Monthly';
+      const now = new Date(), y = now.getFullYear(), m = now.getMonth() + 1;
+      for (let i = 0; i < 12; i++) {
+        let mo = m - i, yr = y;
+        if (mo <= 0) {
+          mo += 12;
+          yr--;
+        }
+        mfix.appendChild(new Option('Month ' + mo + '/' + yr, yr + String(mo).padStart(2, '0')));
+      }
+      sel.appendChild(mfix);
+
+      const qfix = document.createElement('optgroup');
+      qfix.label = 'Quarterly';
+      for (let i = 0; i < 8; i++) {
+        let q = Math.ceil(m / 3) - i, yr = y;
+        if (q <= 0) {
+          q += 4;
+          yr--;
+        }
+        qfix.appendChild(new Option('Q' + q + ' ' + yr, yr + 'Q' + q));
+      }
+      sel.appendChild(qfix);
+
+      const yfix = document.createElement('optgroup');
+      yfix.label = 'Yearly';
+      for (let yr = y; yr >= y - 4; yr--) {
+        yfix.appendChild(new Option(String(yr), String(yr)));
+      }
+      sel.appendChild(yfix);
+
+      sel.value = 'LAST_12_MONTHS';
+    }
+
+    async function loadData() {
+      const ou = document.getElementById('ouSelect').value;
+      const pe = document.getElementById('peSelect').value;
+      const btn = document.getElementById('loadBtn');
+      btn.disabled = true;
+      btn.textContent = '⏳ Loading...';
+
+      try {
+        await Promise.all([initChart1(ou, pe)]);
+        document.getElementById('lastUpdated').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '↻ Load data';
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      generatePeriods();
+
+      if (PREVIEW) {
+        const sel = document.getElementById('ouSelect');
+        [
+          ['User organisation unit', 'USER_ORGUNIT'],
+          ['User sub-units', 'USER_ORGUNIT_CHILDREN'],
+          ['User sub-x2-units', 'USER_ORGUNIT_GRANDCHILDREN']
+        ].forEach(([l, v]) => sel.appendChild(new Option(l, v)));
+        sel.value = 'USER_ORGUNIT';
+        await loadData();
+        return;
+      }
+
+      try {
+        await loadOrgUnits();
+        await loadData();
+      } catch (e) {
+        console.error('Init error:', e);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -40,10 +40,10 @@ class ChartLibrary(ctk.CTkToplevel):
     def __init__(self, parent, current_template_id: str | None = None):
         super().__init__(parent)
         self.title("Chart Template Library")
-        self.geometry("1020x640")
         self.minsize(860, 520)
         self.grab_set()
         self.focus_force()
+        self.after(0, lambda: self.state("zoomed"))
 
         self._selected_id: str | None = current_template_id
         self.result: str | None = None  # template id, set on OK

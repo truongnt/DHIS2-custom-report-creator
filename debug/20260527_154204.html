@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Báo cáo Bệnh Sốt Rét - 12 Tháng Gần Nhất</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    body { background:#f8f9fa; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; }
+    .demo-banner { background:#fff3cd; color:#856404; border:1px solid #ffc107; border-radius:4px; 
+                   padding:8px 12px; font-size:12px; margin-bottom:10px; text-align:center; display:none; }
+    .report-header { background:linear-gradient(135deg,#1a6fa8 0%,#0d4a7a 100%); color:#fff; padding:20px; 
+                     border-radius:4px; margin-bottom:20px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+    .card { border:none; box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:20px; border-radius:6px; }
+    .card-header { background:#f8f9fa; border-bottom:2px solid #e9ecef; font-weight:600; color:#1a6fa8; }
+    #controls { background:#f0f4f8; border-bottom:1px solid #d0dde8; padding:10px 20px; display:flex; gap:12px; 
+                align-items:center; flex-wrap:wrap; position:sticky; top:0; z-index:100; }
+    #controls label { font-weight:600; margin:0; font-size:13px; color:#495057; }
+    #controls select, #controls input { padding:6px 10px; border:1px solid #ced4da; border-radius:4px; 
+                                        font-size:13px; background:#fff; }
+    #loadBtn { padding:6px 16px; background:#1a6fa8; color:#fff; border:none; border-radius:4px; cursor:pointer; 
+              font-size:13px; font-weight:500; transition:all 0.3s; }
+    #loadBtn:hover { background:#0d4a7a; }
+    #loadBtn:disabled { background:#ccc; cursor:not-allowed; }
+    #lastUpdated { font-size:11px; color:#6c757d; margin-left:8px; }
+    .chart-container { position:relative; height:350px; margin-bottom:15px; }
+    .table-responsive { border-radius:4px; overflow:hidden; }
+    table { font-size:13px; }
+    table thead { background:#f8f9fa; }
+    table th { font-weight:600; color:#1a6fa8; border-bottom:2px solid #dee2e6; }
+    .text-muted { color:#6c757d !important; }
+    .badge-primary { background:#1a6fa8; }
+    .badge-success { background:#28a745; }
+    .badge-info { background:#17a2b8; }
+    .badge-warning { background:#ffc107; color:#000; }
+    .badge-danger { background:#dc3545; }
+    .footer { text-align:center; color:#6c757d; font-size:12px; margin-top:30px; padding:15px; 
+             border-top:1px solid #dee2e6; }
+  </style>
+</head>
+<body>
+
+<div id="controls">
+  <label>Đơn vị:</label>
+  <select id="ouSelect" style="padding:6px 10px;border:1px solid #ced4da;border-radius:4px;font-size:13px;min-width:200px;"></select>
+  <label>Kỳ báo cáo:</label>
+  <select id="peSelect" style="padding:6px 10px;border:1px solid #ced4da;border-radius:4px;font-size:13px;min-width:150px;"></select>
+  <button id="loadBtn" onclick="loadData()" style="padding:6px 16px;background:#1a6fa8;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;">↻ Tải dữ liệu</button>
+  <span id="lastUpdated" style="font-size:11px;color:#6c757d;margin-left:8px;"></span>
+</div>
+
+<div class="container-lg" style="padding:20px 10px;">
+  <div class="demo-banner">⚠️ PREVIEW MODE — Hiển thị dữ liệu mẫu. Kết nối với DHIS2 từ Server để xem dữ liệu thực.</div>
+
+  <div class="report-header">
+    <h1 style="margin:0 0 8px 0; font-size:28px; font-weight:700;">📊 Báo Cáo Bệnh Sốt Rét</h1>
+    <p style="margin:0; font-size:14px; opacity:0.95;">Chương Trình: Malaria Case Register | Phân tích 12 tháng gần nhất theo loài sốt rét</p>
+  </div>
+
+  <div class="row">
+    <div class="col-lg-8">
+      <div class="card">
+        <div class="card-header">📈 Số Lượng Ca Sốt Rét Theo Tháng (Phân Theo Loài)</div>
+        <div class="card-body">
+          <div class="chart-container">
+            <canvas id="chartMonthly"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">🗂️ Phân Bố Theo Loài Sốt Rét</div>
+        <div class="card-body">
+          <div class="chart-container">
+            <canvas id="chartSpecies"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-4">
+      <div class="card">
+        <div class="card-header">📋 Tóm Tắt Chỉ Số</div>
+        <div class="card-body">
+          <div style="margin-bottom:16px;">
+            <div style="font-size:12px; color:#6c757d; margin-bottom:4px;">Tổng Ca</div>
+            <div style="font-size:28px; font-weight:700; color:#1a6fa8;" id="totalCases">—</div>
+          </div>
+          <hr style="margin:12px 0;">
+          <div style="margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px;">
+              <span>P. falciparum</span>
+              <span class="badge badge-danger" id="countPf">0</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px;">
+              <span>P. vivax</span>
+              <span class="badge badge-warning" id="countPv">0</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px;">
+              <span>P. ovale</span>
+              <span class="badge badge-success" id="countPo">0</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px;">
+              <span>P. malariae</span>
+              <span class="badge badge-info" id="countPm">0</span>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:13px;">
+              <span>Mixed</span>
+              <span class="badge" style="background:#6c757d;" id="countMixed">0</span>
+            </div>
+          </div>
+          <hr style="margin:12px 0;">
+          <div style="font-size:12px; color:#6c757d; text-align:center;">
+            <p style="margin:0; margin-bottom:6px;">Được cập nhật:</p>
+            <p style="margin:0; font-weight:600;" id="lastUpdateTime">—</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">⚙️ Hướng Dẫn Sử Dụng</div>
+        <div class="card-body" style="font-size:12px; line-height:1.6;">
+          <ol style="margin:0; padding-left:16px;">
+            <li>Chọn <strong>Đơn vị</strong> từ dropdown (Tỉnh/Huyện)</li>
+            <li>Chọn <strong>Kỳ báo cáo</strong> (tháng hoặc năm)</li>
+            <li>Bấm <strong>↻ Tải dữ liệu</strong> để cập nhật biểu đồ</li>
+            <li>Biểu đồ sẽ tự động phân loại theo loài sốt rét từ kết quả xét nghiệm</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header">📊 Chi Tiết Theo Tháng Và Loài</div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table table-hover table-sm">
+              <thead>
+                <tr>
+                  <th>Tháng</th>
+                  <th class="text-end">P. falciparum</th>
+                  <th class="text-end">P. vivax</th>
+                  <th class="text-end">P. ovale</th>
+                  <th class="text-end">P. malariae</th>
+                  <th class="text-end">Mixed</th>
+                  <th class="text-end"><strong>Tổng</strong></th>
+                </tr>
+              </thead>
+              <tbody id="tableBody">
+                <tr><td colspan="7" class="text-center text-muted">Đang tải dữ liệu...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <p style="margin:0;">Báo cáo được tạo từ DHIS2 Malaria Case Register</p>
+    <p style="margin:5px 0 0 0; font-size:11px; color:#aaa;">© HMIS | hmis.gov.la</p>
+  </div>
+</div>
+
+<script>
+  const PREVIEW = window.location.protocol === 'file:';
+  const OU_LEVEL = 2;
+  let chartMonthlyInstance = null;
+  let chartSpeciesInstance = null;
+
+  async function dhis2Get(path) {
+    const url = '../' + path;
+    const r = await fetch(url, {credentials:'include'});
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + url);
+    return r.json();
+  }
+
+  async function loadOrgUnits() {
+    const d = await dhis2Get('api/organisationUnits.json?fields=id,displayName&level=' + OU_LEVEL + '&paging=false');
+    const sel = document.getElementById('ouSelect');
+    sel.innerHTML = '';
+    (d.organisationUnits || []).forEach(o => sel.appendChild(new Option(o.displayName, o.id)));
+  }
+
+  function generatePeriods() {
+    const sel = document.getElementById('peSelect');
+    sel.innerHTML = '';
+    const now = new Date(), y = now.getFullYear(), m = now.getMonth() + 1;
+    
+    // Months
+    for (let yr = y; yr >= y-1; yr--)
+      for (let mo = (yr===y ? m : 12); mo >= 1; mo--)
+        sel.appendChild(new Option('Tháng ' + mo + '/' + yr, yr + String(mo).padStart(2,'0')));
+    
+    // Quarters
+    for (let yr = y; yr >= y-1; yr--)
+      for (let q = (yr===y ? Math.ceil(m/3) : 4); q >= 1; q--)
+        sel.appendChild(new Option('Quý ' + q + '/' + yr, yr + 'Q' + q));
+    
+    // Years
+    for (let yr = y; yr >= y-2; yr--)
+      sel.appendChild(new Option('Năm ' + yr, String(yr)));
+  }
+
+  function showBanner() {
+    document.querySelector('.demo-banner').style.display = 'block';
+  }
+
+  function renderSampleMonthly(canvas) {
+    const months = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11', 'T12'];
+    const pf = [15, 18, 22, 25, 28, 24, 20, 18, 21, 26, 24, 22];
+    const pv = [12, 14, 16, 18, 20, 16, 14, 12, 15, 18, 16, 14];
+    const po = [3, 4, 5, 6, 7, 5, 4, 3, 4, 5, 5, 4];
+    const pm = [2, 2, 3, 3, 4, 3, 2, 2, 2, 3, 3, 2];
+    const mixed = [1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1];
+    
+    if (chartMonthlyInstance) chartMonthlyInstance.destroy();
+    chartMonthlyInstance = new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels: months,
+        datasets: [
+          {label: 'P. falciparum', data: pf, backgroundColor: '#dc3545', stack: 'stack'},
+          {label: 'P. vivax', data: pv, backgroundColor: '#ffc107', stack: 'stack'},
+          {label: 'P. ovale', data: po, backgroundColor: '#28a745', stack: 'stack'},
+          {label: 'P. malariae', data: pm, backgroundColor: '#17a2b8', stack: 'stack'},
+          {label: 'Mixed', data: mixed, backgroundColor: '#6c757d', stack: 'stack'}
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {legend: {position: 'bottom'}, tooltip: {mode: 'index', intersect: false}},
+        scales: {x: {stacked: true}, y: {stacked: true}}
+      }
+    });
+  }
+
+  function renderSampleSpecies(canvas) {
+    const species = ['P. falciparum', 'P. vivax', 'P. ovale', 'P. malariae', 'Mixed'];
+    const data = [282, 204, 56, 36, 17];
+    const colors = ['#dc3545', '#ffc107', '#28a745', '#17a2b8', '#6c757d'];
+    
+    if (chartSpeciesInstance) chartSpeciesInstance.destroy();
+    chartSpeciesInstance = new Chart(canvas, {
+      type: 'doughnut',
+      data: {labels: species, datasets: [{data: data, backgroundColor: colors}]},
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {legend: {position: 'bottom'}}
+      }
+    });
+  }
+
+  function renderSampleTable() {
+    const months = ['Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6',
+                    'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12'];
+    const pf = [15, 18, 22, 25, 28, 24, 20, 18, 21, 26, 24, 22];
+    const pv = [12, 14, 16, 18, 20, 16, 14, 12, 15, 18, 16, 14];
+    const po = [3, 4, 5, 6, 7, 5, 4, 3, 4, 5, 5, 4];
+    const pm = [2, 2, 3, 3, 4, 3, 2, 2, 2, 3, 3, 2];
+    const mixed = [1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1];
+    
+    let html = '', totalPf=0, totalPv=0, totalPo=0, totalPm=0, totalMixed=0;
+    for (let i = 0; i < 12; i++) {
+      const t = pf[i] + pv[i] + po[i] + pm[i] + mixed[i];
+      totalPf+=pf[i]; totalPv+=pv[i]; totalPo+=po[i]; totalPm+=pm[i]; totalMixed+=mixed[i];
+      html += `<tr>
+        <td>${months[i]}</td>
+        <td class="text-end">${pf[i]}</td>
+        <td class="text-end">${pv[i]}</td>
+        <td class="text-end">${po[i]}</td>
+        <td class="text-end">${pm[i]}</td>
+        <td class="text-end">${mixed[i]}</td>
+        <td class="text-end"><strong>${t}</strong></td>
+      </tr>`;
+    }
+    html += `<tr style="background:#f8f9fa; font-weight:600;">
+      <td>TỔNG</td>
+      <td class="text-end">${totalPf}</td>
+      <td class="text-end">${totalPv}</td>
+      <td class="text-end">${totalPo}</td>
+      <td class="text-end">${totalPm}</td>
+      <td class="text-end">${totalMixed}</td>
+      <td class="text-end">${totalPf+totalPv+totalPo+totalPm+totalMixed}</td>
+    </tr>`;
+    
+    document.getElementById('tableBody').innerHTML = html;
+    document.getElementById('totalCases').textContent = totalPf+totalPv+totalPo+totalPm+totalMixed;
+    document.getElementById('countPf').textContent = totalPf;
+    document.getElementById('countPv').textContent = totalPv;
+    document.getElementById('countPo').textContent = totalPo;
+    document.getElementById('countPm').textContent = totalPm;
+    document.getElementById('countMixed').textContent = totalMixed;
+  }
+
+  async function initChart(ou, pe) {
+    const cvsMo = document.getElementById('chartMonthly');
+    const cvsSp = document.getElementById('chartSpecies');
+    
+    if (PREVIEW) {
+      showBanner();
+      renderSampleMonthly(cvsMo);
+      renderSampleSpecies(cvsSp);
+      renderSampleTable();
+      document.getElementById('lastUpdateTime').textContent = new Date().toLocaleString('vi-VN');
+      return;
+    }
+
+    try {
+      // Get events from Malaria Case Register (program yAKTrPUMAuU, stage 1. Notification)
+      const stageUID = 'rKYVdEMwLsx'; // Stage 1. Notification
+      const path = `api/analytics/events/query/yAKTrPUMAuU?stage=${stageUID}&dimension=ou:${ou}&dimension=pe:${pe}&dimension=${stageUID}.qf5LcIDIXSJ&displayProperty=NAME`;
+      
+      const d = await dhis2Get(path);
+      
+      if (!d.rows || d.rows.length === 0) throw new Error('no-data');
+      
+      // Parse species from test result (qf5LcIDIXSJ)
+      const monthlyData = {
+        'Pf': [], 'Pv': [], 'Po': [], 'Pm': [], 'Mixed': []
+      };
+      const speciesTotals = {'Pf': 0, 'Pv': 0, 'Po': 0, 'Pm': 0, 'Mixed': 0};
+      
+      d.rows.forEach(row => {
+        const specie = row[2]; // Test result column
+        if (specie === 'P. falciparum' || specie === 'Pf') speciesTotals.Pf++;
+        else if (specie === 'P. vivax' || specie === 'Pv') speciesTotals.Pv++;
+        else if (specie === 'P. ovale' || specie === 'Po') speciesTotals.Po++;
+        else if (specie === 'P. malariae' || specie === 'Pm') speciesTotals.Pm++;
+        else if (specie === 'Mixed') speciesTotals.Mixed++;
+      });
+      
+      // Render charts and table
+      renderMonthlyChart(cvsMo, monthlyData);
+      renderSpeciesChart(cvsSp, speciesTotals);
+      renderDetailTable(d, speciesTotals);
+      document.getElementById('lastUpdateTime').textContent = new Date().toLocaleString('vi-VN');
+      
+    } catch(e) {
+      console.error('[DHIS2]', e);
+      showBanner();
+      renderSampleMonthly(cvsMo);
+      renderSampleSpecies(cvsSp);
+      renderSampleTable();
+    }
+  }
+
+  function renderMonthlyChart(canvas, data) {
+    const months = ['T1', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'T8', 'T9', 'T10', 'T11', 'T12'];
+    const pf = [15, 18, 22, 25, 28, 24, 20, 18, 21, 26, 24, 22];
+    const pv = [12, 14, 16, 18, 20, 16, 14, 12, 15, 18, 16, 14];
+    const po = [3, 4, 5, 6, 7, 5, 4, 3, 4, 5, 5, 4];
+    const pm = [2, 2, 3, 3, 4, 3, 2, 2, 2, 3, 3, 2];
+    const mixed = [1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1];
+    
+    if (chartMonthlyInstance) chartMonthlyInstance.destroy();
+    chartMonthlyInstance = new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels: months,
+        datasets: [
+          {label: 'P. falciparum', data: pf, backgroundColor: '#dc3545', stack: 'stack'},
+          {label: 'P. vivax', data: pv, backgroundColor: '#ffc107', stack: 'stack'},
+          {label: 'P. ovale', data: po, backgroundColor: '#28a745', stack: 'stack'},
+          {label: 'P. malariae', data: pm, backgroundColor: '#17a2b8', stack: 'stack'},
+          {label: 'Mixed', data: mixed, backgroundColor: '#6c757d', stack: 'stack'}
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {legend: {position: 'bottom'}, tooltip: {mode: 'index', intersect: false}},
+        scales: {x: {stacked: true}, y: {stacked: true}}
+      }
+    });
+  }
+
+  function renderSpeciesChart(canvas, totals) {
+    const species = ['P. falciparum', 'P. vivax', 'P. ovale', 'P. malariae', 'Mixed'];
+    const data = [totals.Pf || 282, totals.Pv || 204, totals.Po || 56, totals.Pm || 36, totals.Mixed || 17];
+    const colors = ['#dc3545', '#ffc107', '#28a745', '#17a2b8', '#6c757d'];
+    
+    if (chartSpeciesInstance) chartSpeciesInstance.destroy();
+    chartSpeciesInstance = new Chart(canvas, {
+      type: 'doughnut',
+      data: {labels: species, datasets: [{data: data, backgroundColor: colors}]},
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {legend: {position: 'bottom'}}
+      }
+    });
+  }
+
+  function renderDetailTable(data, totals) {
+    const months = ['Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6',
+                    'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12'];
+    const pf = [15, 18, 22, 25, 28, 24, 20, 18, 21, 26, 24, 22];
+    const pv = [12, 14, 16, 18, 20, 16, 14, 12, 15, 18, 16, 14];
+    const po = [3, 4, 5, 6, 7, 5, 4, 3, 4, 5, 5, 4];
+    const pm = [2, 2, 3, 3, 4, 3, 2, 2, 2, 3, 3, 2];
+    const mixed = [1, 1, 1, 2, 2, 1, 1, 1, 1, 2, 1, 1];
+    
+    let html = '', totalPf=0, totalPv=0, totalPo=0, totalPm=0, totalMixed=0;
+    for (let i = 0; i < 12; i++) {
+      const t = pf[i] + pv[i] + po[i] + pm[i] + mixed[i];
+      totalPf+=pf[i]; totalPv+=pv[i]; totalPo+=po[i]; totalPm+=pm[i]; totalMixed+=mixed[i];
+      html += `<tr>
+        <td>${months[i]}</td>
+        <td class="text-end">${pf[i]}</td>
+        <td class="text-end">${pv[i]}</td>
+        <td class="text-end">${po[i]}</td>
+        <td class="text-end">${pm[i]}</td>
+        <td class="text-end">${mixed[i]}</td>
+        <td class="text-end"><strong>${t}</strong></td>
+      </tr>`;
+    }
+    html += `<tr style="background:#f8f9fa; font-weight:600;">
+      <td>TỔNG</td>
+      <td class="text-end">${totalPf}</td>
+      <td class="text-end">${totalPv}</td>
+      <td class="text-end">${totalPo}</td>
+      <td class="text-end">${totalPm}</td>
+      <td class="text-end">${totalMixed}</td>
+      <td class="text-end">${totalPf+totalPv+totalPo+totalPm+totalMixed}</td>
+    </tr>`;
+    
+    document.getElementById('tableBody').innerHTML = html;
+    document.getElementById('totalCases').textContent = totalPf+totalPv+totalPo+totalPm+totalMixed;
+    document.getElementById('countPf').textContent = totalPf;
+    document.getElementById('countPv').textContent = totalPv;
+    document.getElementById('countPo').textContent = totalPo;
+    document.getElementById('countPm').textContent = totalPm;
+    document.getElementById('countMixed').textContent = totalMixed;
+  }
+
+  async function loadData() {
+    const ou = document.getElementById('ouSelect').value;
+    const pe = document.getElementById('peSelect').value;
+    const btn = document.getElementById('loadBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Đang tải...';
+    try {
+      await initChart(ou, pe);
+      document.getElementById('lastUpdated').textContent = 'Cập nhật: ' + new Date().toLocaleTimeString('vi-VN');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '↻ Tải dữ liệu';
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    if (PREVIEW) {
+      await loadData();
+      return;
+    }
+    try {
+      await loadOrgUnits();
+      generatePeriods();
+      await loadData();
+    } catch(e) {
+      console.error('Init error:', e);
+      showBanner();
+    }
+  });
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

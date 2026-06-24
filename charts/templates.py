@@ -32,6 +32,10 @@ CATEGORIES = [
      "desc": "Bảng dữ liệu chi tiết, pivot, cross-tab"},
     {"id": "combined",     "name": "Combined",       "color": "#c0392b", "icon": "🔀",
      "desc": "Kết hợp nhiều loại chart trên cùng một trang"},
+    {"id": "map",          "name": "Map / Geo",      "color": "#16a085", "icon": "🗺",
+     "desc": "Bản đồ choropleth (area) và bubble point theo đơn vị hành chính"},
+    {"id": "advanced",     "name": "Advanced",       "color": "#7f8c8d", "icon": "🕸",
+     "desc": "Radar/spider chart, scatter, histogram"},
 ]
 
 # ── Shared HTML fragments ─────────────────────────────────────────────────────
@@ -760,6 +764,361 @@ _COMBINED_FULL = _HEAD + """
 </script>""" + _FOOT
 
 
+_LEAFLET_CSS = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+_LEAFLET_JS  = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+
+_MAP_HEAD = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><!-- REPORT_TITLE --></title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{leaflet_css}"/>
+  <script src="{leaflet_js}"></script>
+  <style>
+    body {{ background:#f8f9fa; font-family:'Segoe UI',sans-serif; }}
+    .report-header {{ background:#1a6fa8;color:#fff;padding:14px 20px;margin-bottom:16px;border-radius:6px; }}
+    .report-header h2 {{ margin:0;font-size:1.3rem; }}
+    .report-header small {{ opacity:.8;font-size:.82rem; }}
+    #map {{ height:520px;width:100%;border-radius:4px; }}
+    .legend {{ background:white;padding:10px 14px;border-radius:6px;
+               box-shadow:0 1px 5px rgba(0,0,0,.2);line-height:1.6;font-size:12px; }}
+    .legend-swatch {{ display:inline-block;width:14px;height:14px;
+                      margin-right:6px;vertical-align:middle;border-radius:2px; }}
+    .spinner-wrap {{ text-align:center;padding:60px 0; }}
+  </style>
+</head>
+<body class="p-3">""".format(leaflet_css=_LEAFLET_CSS, leaflet_js=_LEAFLET_JS)
+
+_MAP_LOADER_JS = """
+  async function dhis2Get(url) {
+    const r = await fetch('../' + url, {credentials:'include'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAP AREA — choropleth (polygon boundaries coloured by indicator value)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MAP_AREA = _MAP_HEAD + """
+<div class="container-fluid">
+  <div class="report-header">
+    <h2><!-- REPORT_TITLE --></h2>
+    <small>Period: $!{reportingPeriod} &nbsp;|&nbsp; Org unit: $!{organisationUnit}</small>
+  </div>
+  <div class="card"><div class="card-body p-2">
+    <div id="loading" class="spinner-wrap">
+      <div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Loading map…</p>
+    </div>
+    <div id="map" style="display:none"></div>
+  </div></div>
+</div>
+<script>
+""" + _MAP_LOADER_JS + """
+  const DX       = '<!-- INDICATOR_UID -->';
+  const PE       = '$!{reportingPeriod}' || 'LAST_YEAR';
+  const OU_LEVEL = 2;   // 2 = province, 3 = district
+
+  // YlOrRd-inspired colour scale (low=yellow, high=red)
+  function choroplethColor(val, min, max) {
+    if (val === undefined || isNaN(val)) return '#d3d3d3';
+    const t = Math.max(0, Math.min(1, (val - min) / (max - min || 1)));
+    const stops = [
+      [255,255,178],[254,217,118],[254,178,76],[253,141,60],
+      [240,59,32], [189,0,38]
+    ];
+    const idx = t * (stops.length - 1);
+    const lo = stops[Math.floor(idx)], hi = stops[Math.ceil(idx)];
+    const f  = idx - Math.floor(idx);
+    return 'rgb(' + lo.map((c,i) => Math.round(c + f*(hi[i]-c))).join(',') + ')';
+  }
+
+  (async () => {
+    try {
+      const [geo, ana] = await Promise.all([
+        dhis2Get('api/geoFeatures.json?ou=LEVEL-' + OU_LEVEL + '&displayProperty=NAME'),
+        dhis2Get('api/analytics.json?dimension=dx:' + DX +
+                 '&dimension=pe:' + PE +
+                 '&dimension=ou:LEVEL-' + OU_LEVEL + '&displayProperty=NAME')
+      ]);
+
+      // Build value map {ouId -> value}
+      const vals = {};
+      (ana.rows || []).forEach(r => { vals[r[2]] = parseFloat(r[3]); });
+      const allV = Object.values(vals).filter(v => !isNaN(v));
+      const minV = Math.min(...allV), maxV = Math.max(...allV);
+
+      // Build GeoJSON from DHIS2 polygon geoFeatures (ty===2)
+      const features = geo.filter(f => f.ty === 2 && f.co).map(f => ({
+        type: 'Feature',
+        geometry: JSON.parse(f.co),
+        properties: { id: f.id, name: f.na, value: vals[f.id] }
+      }));
+
+      document.getElementById('loading').style.display = 'none';
+      const mapDiv = document.getElementById('map');
+      mapDiv.style.display = 'block';
+
+      const map = L.map('map');
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        {attribution:'© OpenStreetMap contributors', opacity:0.4}).addTo(map);
+
+      const indicatorName = ana.metaData?.items?.[DX]?.name || DX;
+
+      const layer = L.geoJSON({type:'FeatureCollection', features}, {
+        style: f => ({
+          fillColor: choroplethColor(f.properties.value, minV, maxV),
+          fillOpacity: 0.8, weight: 1, color: '#ffffff'
+        }),
+        onEachFeature: (f, l) => {
+          const v = f.properties.value;
+          l.bindTooltip(
+            '<b>' + f.properties.name + '</b><br>' +
+            (v !== undefined && !isNaN(v) ? v.toLocaleString() : 'N/A'),
+            {sticky: true}
+          );
+          l.on({
+            mouseover: e => e.target.setStyle({weight:2, fillOpacity:0.95}),
+            mouseout:  e => layer.resetStyle(e.target)
+          });
+        }
+      }).addTo(map);
+
+      if (features.length) map.fitBounds(layer.getBounds(), {padding:[20,20]});
+
+      // Legend
+      const legend = L.control({position:'bottomright'});
+      legend.onAdd = () => {
+        const div = L.DomUtil.create('div','legend');
+        div.innerHTML = '<b>' + indicatorName + '</b><br>';
+        const steps = 5;
+        for (let i = steps; i >= 0; i--) {
+          const v = minV + (i/steps)*(maxV-minV);
+          div.innerHTML +=
+            '<span class="legend-swatch" style="background:' +
+            choroplethColor(v,minV,maxV) + '"></span>' +
+            Math.round(v).toLocaleString() + '<br>';
+        }
+        return div;
+      };
+      legend.addTo(map);
+
+    } catch(e) {
+      document.getElementById('loading').innerHTML =
+        '<div class="alert alert-danger m-3">Error: ' + e.message + '</div>';
+    }
+  })();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body></html>"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAP POINT — bubble map (circle size ∝ indicator value)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MAP_POINT = _MAP_HEAD + """
+<div class="container-fluid">
+  <div class="report-header">
+    <h2><!-- REPORT_TITLE --></h2>
+    <small>Period: $!{reportingPeriod} &nbsp;|&nbsp; Org unit: $!{organisationUnit}</small>
+  </div>
+  <div class="card"><div class="card-body p-2">
+    <div id="loading" class="spinner-wrap">
+      <div class="spinner-border text-primary"></div><p class="mt-2 text-muted">Loading map…</p>
+    </div>
+    <div id="map" style="display:none"></div>
+  </div></div>
+</div>
+<script>
+""" + _MAP_LOADER_JS + """
+  const DX       = '<!-- INDICATOR_UID -->';
+  const PE       = '$!{reportingPeriod}' || 'LAST_YEAR';
+  const OU_LEVEL = 3;   // 3 = district/facility level recommended for point maps
+
+  const MAX_RADIUS = 30;   // px — largest bubble
+  const MIN_RADIUS = 4;
+
+  (async () => {
+    try {
+      const [geo, ana] = await Promise.all([
+        dhis2Get('api/geoFeatures.json?ou=LEVEL-' + OU_LEVEL + '&displayProperty=NAME'),
+        dhis2Get('api/analytics.json?dimension=dx:' + DX +
+                 '&dimension=pe:' + PE +
+                 '&dimension=ou:LEVEL-' + OU_LEVEL + '&displayProperty=NAME')
+      ]);
+
+      const vals = {};
+      (ana.rows || []).forEach(r => { vals[r[2]] = parseFloat(r[3]); });
+      const allV = Object.values(vals).filter(v => !isNaN(v));
+      const maxV = Math.max(...allV) || 1;
+
+      // Point features: ty === 1 (Point geometry)
+      const points = geo.filter(f => f.ty === 1 && f.co).map(f => {
+        const coords = JSON.parse(f.co);   // [lon, lat]
+        return { id: f.id, name: f.na, lat: coords[1], lon: coords[0], value: vals[f.id] };
+      });
+
+      document.getElementById('loading').style.display = 'none';
+      const mapDiv = document.getElementById('map');
+      mapDiv.style.display = 'block';
+
+      const map = L.map('map');
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        {attribution:'© OpenStreetMap contributors'}).addTo(map);
+
+      const indicatorName = ana.metaData?.items?.[DX]?.name || DX;
+      const bounds = [];
+
+      points.forEach(p => {
+        const v = p.value;
+        const r = (v && !isNaN(v))
+          ? MIN_RADIUS + (v / maxV) * (MAX_RADIUS - MIN_RADIUS)
+          : MIN_RADIUS;
+
+        const marker = L.circleMarker([p.lat, p.lon], {
+          radius: r,
+          fillColor: '#1a6fa8', fillOpacity: 0.75,
+          color: '#ffffff', weight: 1
+        }).addTo(map);
+
+        marker.bindTooltip(
+          '<b>' + p.name + '</b><br>' + indicatorName + ': ' +
+          (v !== undefined && !isNaN(v) ? v.toLocaleString() : 'N/A'),
+          {sticky: true}
+        );
+        bounds.push([p.lat, p.lon]);
+      });
+
+      if (bounds.length) map.fitBounds(bounds, {padding:[20,20]});
+      else map.setView([0,0], 5);
+
+      // Legend (size guide)
+      const legend = L.control({position:'bottomright'});
+      legend.onAdd = () => {
+        const div = L.DomUtil.create('div','legend');
+        div.innerHTML = '<b>' + indicatorName + '</b><br>';
+        [[maxV, MAX_RADIUS], [maxV/2, (MIN_RADIUS+MAX_RADIUS)/2], [0, MIN_RADIUS]].forEach(([v,r]) => {
+          div.innerHTML +=
+            '<svg width="' + (r*2+2) + '" height="' + (r*2+2) + '" style="vertical-align:middle;margin-right:4px">' +
+            '<circle cx="' + (r+1) + '" cy="' + (r+1) + '" r="' + r +
+            '" fill="#1a6fa8" fill-opacity=".7" stroke="white" stroke-width="1"/></svg>' +
+            Math.round(v).toLocaleString() + '<br>';
+        });
+        return div;
+      };
+      legend.addTo(map);
+
+    } catch(e) {
+      document.getElementById('loading').innerHTML =
+        '<div class="alert alert-danger m-3">Error: ' + e.message + '</div>';
+    }
+  })();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body></html>"""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RADAR — spider chart comparing multiple indicators or org units
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RADAR = _HEAD + """
+<div class="container-fluid">
+  <div class="report-header">
+    <h2><!-- REPORT_TITLE --></h2>
+    <small>Period: $!{reportingPeriod} &nbsp;|&nbsp; Org unit: $!{organisationUnit}</small>
+  </div>
+  <div class="card"><div class="card-body">
+    <div id="loading" class="spinner-wrap">
+      <div class="spinner-border text-primary"></div><p class="mt-2">Loading…</p>
+    </div>
+    <canvas id="chart" style="display:none; max-height:480px"></canvas>
+  </div></div>
+</div>
+<script>
+""" + _LOADER_JS + """
+  // Multiple indicators compared for a single org unit
+  const DX_LIST = [
+    '<!-- INDICATOR_UID_1 -->',
+    '<!-- INDICATOR_UID_2 -->',
+    '<!-- INDICATOR_UID_3 -->',
+    '<!-- INDICATOR_UID_4 -->',
+    '<!-- INDICATOR_UID_5 -->',
+  ];
+  const PE = '$!{reportingPeriod}' || 'LAST_YEAR';
+  const OU = '$!{organisationUnit}' || 'USER_ORGUNIT';
+
+  const COLORS = [
+    { border:'#1a6fa8', bg:'rgba(26,111,168,0.15)' },
+    { border:'#27ae60', bg:'rgba(39,174,96,0.15)' },
+    { border:'#e67e22', bg:'rgba(230,126,34,0.15)' },
+  ];
+
+  (async () => {
+    try {
+      const d = await dhis2Get(
+        'api/analytics.json?dimension=dx:' + DX_LIST.join(';') +
+        '&dimension=pe:' + PE + '&dimension=ou:' + OU + '&displayProperty=NAME'
+      );
+
+      // One dataset per org unit (for multi-OU comparison) or per period
+      // Default: compare indicator values for the selected OU
+      const labels = DX_LIST.map(uid => d.metaData?.items?.[uid]?.name || uid);
+
+      // Build values: one value per indicator for the selected OU
+      const values = DX_LIST.map(uid => {
+        const row = (d.rows || []).find(r => r[0] === uid);
+        return row ? parseFloat(row[3]) : 0;
+      });
+
+      // Normalise to % of max so all axes are comparable
+      const maxV = Math.max(...values, 1);
+      const normalised = values.map(v => Math.round((v / maxV) * 100));
+
+      document.getElementById('loading').style.display = 'none';
+      const cvs = document.getElementById('chart');
+      cvs.style.display = 'block';
+
+      new Chart(cvs, {
+        type: 'radar',
+        data: {
+          labels,
+          datasets: [{
+            label: d.metaData?.items?.[OU]?.name || 'Values',
+            data: normalised,
+            borderColor: COLORS[0].border,
+            backgroundColor: COLORS[0].bg,
+            pointBackgroundColor: COLORS[0].border,
+            pointRadius: 4, borderWidth: 2,
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position:'top' },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const raw = values[ctx.dataIndex];
+                  return ctx.dataset.label + ': ' + (raw !== undefined ? raw.toLocaleString() : 'N/A');
+                }
+              }
+            }
+          },
+          scales: {
+            r: {
+              beginAtZero: true, max: 100,
+              ticks: { stepSize: 20, callback: v => v + '%' },
+              pointLabels: { font: { size: 12 } }
+            }
+          }
+        }
+      });
+    } catch(e) { showError('loading', e.message); }
+  })();
+</script>""" + _FOOT
+
 # ── Template registry ─────────────────────────────────────────────────────────
 
 TEMPLATES: list[dict] = [
@@ -885,6 +1244,35 @@ TEMPLATES: list[dict] = [
         "best_for": "Báo cáo tổng hợp đầy đủ 1 trang",
         "placeholders": "3-5",
         "html": _COMBINED_FULL,
+    },
+    # ── Map ──────────────────────────────────────────────────────────────────
+    {
+        "id": "map_area",
+        "category": "map",
+        "name": "Map — Area (Choropleth)",
+        "short": "Bản đồ màu theo giá trị chỉ số",
+        "best_for": "So sánh tỉnh/huyện trên bản đồ (polygon)",
+        "placeholders": 1,
+        "html": _MAP_AREA,
+    },
+    {
+        "id": "map_point",
+        "category": "map",
+        "name": "Map — Bubble Point",
+        "short": "Bản đồ bong bóng kích thước theo giá trị",
+        "best_for": "Hiển thị cơ sở y tế / điểm dữ liệu theo địa lý",
+        "placeholders": 1,
+        "html": _MAP_POINT,
+    },
+    # ── Advanced ─────────────────────────────────────────────────────────────
+    {
+        "id": "radar",
+        "category": "advanced",
+        "name": "Radar / Spider Chart",
+        "short": "Mạng nhện so sánh nhiều chỉ số",
+        "best_for": "So sánh profile giữa các đơn vị hoặc nhiều chỉ số cùng lúc",
+        "placeholders": "3-8",
+        "html": _RADAR,
     },
 ]
 

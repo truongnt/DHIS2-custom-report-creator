@@ -23,13 +23,39 @@ _SERIES_COLORS = [_BLUE, _GREEN, _ORANGE, _PURPLE, _RED, _TEAL]
 
 
 def draw_chart_preview(canvas: tk.Canvas, template_id: str,
-                        x: int, y: int, w: int, h: int) -> None:
-    """Draw a representative static preview in the bounding box (x,y,x+w,y+h)."""
+                        x: int, y: int, w: int, h: int,
+                        color: str | None = None) -> None:
+    """Draw a representative preview in the bounding box.
+    color: hex color for single-series charts (bar, line, scorecard).
+           Multi-series charts (pie, grouped, stacked) keep their palette.
+    """
     fn = _DISPATCH.get(template_id, _draw_bar_monthly)
-    fn(canvas, x, y, w, h)
+    # Single-series drawers support color override; multi-series ignore it
+    _SINGLE_SERIES = {
+        "bar_monthly", "line_single", "bar_horizontal_ou", "scorecard", "traffic_light"
+    }
+    if color and template_id in _SINGLE_SERIES:
+        fn(canvas, x, y, w, h, color=color)
+    else:
+        fn(canvas, x, y, w, h)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+def _lighten(hex_color: str, amount: float = 0.5) -> str:
+    """Mix hex_color with white by `amount` (0=original, 1=white)."""
+    try:
+        h = hex_color.lstrip("#")
+        if len(h) != 6:
+            return "#d0e8f5"
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        r2 = int(r + (255 - r) * amount)
+        g2 = int(g + (255 - g) * amount)
+        b2 = int(b + (255 - b) * amount)
+        return f"#{r2:02x}{g2:02x}{b2:02x}"
+    except Exception:
+        return "#d0e8f5"
+
 
 def _pad(x, y, w, h, px=8, py=8):
     return x + px, y + py, w - px * 2, h - py * 2
@@ -53,10 +79,11 @@ def _draw_axes(canvas, x, y, w, h, color="#ccc"):
 
 # ── individual drawers ────────────────────────────────────────────────────────
 
-def _draw_line_single(canvas, x, y, w, h):
+def _draw_line_single(canvas, x, y, w, h, color=None):
+    c = color or _BLUE
+    # derive a light fill by mixing color toward white
     ix, iy, iw, ih = _pad(x, y, w, h, 10, 10)
     _draw_axes(canvas, ix, iy, iw, ih)
-    # Zigzag line
     n = 7
     xs = [ix + i * iw / (n - 1) for i in range(n)]
     raw = [0.7, 0.4, 0.6, 0.3, 0.5, 0.2, 0.45]
@@ -64,10 +91,9 @@ def _draw_line_single(canvas, x, y, w, h):
     pts = []
     for px, py2 in zip(xs, ys):
         pts += [px, py2]
-    canvas.create_line(pts, fill=_BLUE, width=2, smooth=True)
-    # Fill area below line
+    canvas.create_line(pts, fill=c, width=2, smooth=True)
     area = pts + [xs[-1], iy + ih, xs[0], iy + ih]
-    canvas.create_polygon(area, fill=_BLUE + "33", outline="")
+    canvas.create_polygon(area, fill=_lighten(c), outline="")
 
 
 def _draw_line_multi(canvas, x, y, w, h):
@@ -88,7 +114,8 @@ def _draw_line_multi(canvas, x, y, w, h):
         canvas.create_line(pts, fill=color, width=2, smooth=True)
 
 
-def _draw_bar_monthly(canvas, x, y, w, h):
+def _draw_bar_monthly(canvas, x, y, w, h, color=None):
+    c = color or _BLUE
     ix, iy, iw, ih = _pad(x, y, w, h, 10, 10)
     _draw_axes(canvas, ix, iy, iw, ih)
     n = 6
@@ -99,7 +126,7 @@ def _draw_bar_monthly(canvas, x, y, w, h):
         bx = ix + i * (bw + gap)
         bh2 = ih * ratio
         by = iy + ih - bh2
-        _bar(canvas, bx, by, bw, bh2, _BLUE + "cc")
+        _bar(canvas, bx, by, bw, bh2, c)
 
 
 def _draw_bar_grouped(canvas, x, y, w, h):
@@ -110,7 +137,7 @@ def _draw_bar_grouped(canvas, x, y, w, h):
     group_w = iw / groups
     bar_w = group_w / (series + 1)
     data = [[0.6, 0.4, 0.7, 0.5], [0.4, 0.7, 0.5, 0.8]]
-    colors = [_BLUE + "cc", _GREEN + "cc"]
+    colors = [_BLUE, _GREEN]
     for s, (row, color) in enumerate(zip(data, colors)):
         for g, ratio in enumerate(row):
             bx = ix + g * group_w + s * bar_w + bar_w * 0.3
@@ -130,7 +157,7 @@ def _draw_bar_stacked(canvas, x, y, w, h):
         [0.2, 0.3,  0.2, 0.25, 0.2],
         [0.15, 0.2, 0.1, 0.2, 0.15],
     ]
-    colors = [_BLUE + "cc", _GREEN + "cc", _ORANGE + "cc"]
+    colors = [_BLUE, _GREEN, _ORANGE]
     for i in range(n):
         base = iy + ih
         bx = ix + i * (bw + gap)
@@ -141,23 +168,22 @@ def _draw_bar_stacked(canvas, x, y, w, h):
             base -= seg_h
 
 
-def _draw_bar_horizontal_ou(canvas, x, y, w, h):
+def _draw_bar_horizontal_ou(canvas, x, y, w, h, color=None):
+    c = color or _BLUE
     ix, iy, iw, ih = _pad(x, y, w, h, 22, 8)
-    # Y axis
     canvas.create_line(ix, iy, ix, iy + ih, fill="#ccc", width=1)
-    # X axis
     canvas.create_line(ix, iy + ih, ix + iw, iy + ih, fill="#ccc", width=1)
     rows = 5
     gap = 3
     bar_h = (ih - gap * (rows - 1)) / rows
     widths = [0.9, 0.7, 0.6, 0.45, 0.3]
-    colors = [_BLUE, _BLUE + "bb", _BLUE + "99", _BLUE + "77", _BLUE + "55"]
-    for i, (ratio, color) in enumerate(zip(widths, colors)):
+    shades = [c, _lighten(c, 0.15), _lighten(c, 0.3),
+              _lighten(c, 0.45), _lighten(c, 0.6)]
+    for i, (ratio, shade) in enumerate(zip(widths, shades)):
         by2 = iy + i * (bar_h + gap)
         bw2 = iw * ratio
         canvas.create_rectangle(ix, by2, ix + bw2, by2 + bar_h,
-                                 fill=color, outline="")
-        # Label
+                                 fill=shade, outline="")
         canvas.create_text(ix - 2, by2 + bar_h / 2,
                             text=["A", "B", "C", "D", "E"][i],
                             anchor="e", font=("Segoe UI", 7), fill="#555")
@@ -197,21 +223,22 @@ def _draw_donut(canvas, x, y, w, h):
                        fill="#1e2d3d")
 
 
-def _draw_scorecard(canvas, x, y, w, h):
+def _draw_scorecard(canvas, x, y, w, h, color=None):
+    c = color or _BLUE
     cols, rows = 2, 2
     pad = 5
     cw = (w - pad * (cols + 1)) / cols
     ch = (h - pad * (rows + 1)) / rows
-    colors = [_BLUE, _GREEN, _ORANGE, _PURPLE]
+    shades = [c, _lighten(c, 0.2), _lighten(c, 0.1), _lighten(c, 0.3)]
     vals   = ["1,240", "87%", "3.2k", "98%"]
     for r in range(rows):
-        for c in range(cols):
-            idx  = r * cols + c
-            cx2  = x + pad + c * (cw + pad)
+        for ci in range(cols):
+            idx  = r * cols + ci
+            cx2  = x + pad + ci * (cw + pad)
             cy2  = y + pad + r * (ch + pad)
             canvas.create_rectangle(cx2, cy2, cx2 + cw, cy2 + ch,
-                                     fill=colors[idx], outline="")
-            canvas.create_text(cx2 + cw / 2, cy2 + ch / 2 - 5,
+                                     fill=shades[idx], outline="")
+            canvas.create_text(cx2 + cw / 2, cy2 + ch / 2 - 4,
                                 text=vals[idx],
                                 font=("Segoe UI", 9, "bold"),
                                 fill="white")
@@ -276,7 +303,7 @@ def _draw_combined_bar_line(canvas, x, y, w, h):
     for i, ratio in enumerate(bar_data):
         bx = ix + i * (bw + gap)
         bh2 = ih * ratio
-        _bar(canvas, bx, iy + ih - bh2, bw, bh2, _BLUE + "99")
+        _bar(canvas, bx, iy + ih - bh2, bw, bh2, "#6aafcf")
 
     # Line overlay
     xs = [ix + i * (bw + gap) + bw / 2 for i in range(n)]

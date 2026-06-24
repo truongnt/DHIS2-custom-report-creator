@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Malaria Cases</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+  <style>
+    body{background:#f0f4f8;}
+    .demo-banner{background:#fff3cd;color:#856404;border:1px solid #ffc107;border-radius:4px;
+      padding:3px 10px;font-size:11px;margin-bottom:6px;text-align:center;display:none;}
+    .card-header{background:#1a6fa8;color:#fff;padding:8px 14px;}
+    .card-header h6{margin:0;font-size:13px;font-weight:600;}
+  </style>
+</head>
+<body>
+  <div id="controls" style="background:#f0f4f8;border-bottom:1px solid #d0dde8;padding:10px 20px;
+    display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:100;">
+    <label style="font-weight:600;margin:0;font-size:13px">Org unit:</label>
+    <select id="ouSelect" style="padding:4px 8px;border:1px solid #ced4da;border-radius:4px;font-size:13px"></select>
+    <label style="font-weight:600;margin:0;font-size:13px">Period:</label>
+    <select id="peSelect" style="padding:4px 8px;border:1px solid #ced4da;border-radius:4px;font-size:13px"></select>
+    <button id="loadBtn" onclick="loadData()" style="padding:5px 16px;background:#1a6fa8;color:#fff;
+      border:none;border-radius:4px;cursor:pointer;font-size:13px">↻ Load data</button>
+    <span id="lastUpdated" style="font-size:11px;color:#6c757d;margin-left:8px"></span>
+  </div>
+  <div class="container-fluid px-3 py-3">
+    <div class="row">
+      <!-- CARD-START:card_1 -->
+      <div class="col-md-12 mb-4">
+        <div class="card h-100 shadow-sm">
+          <div class="card-header"><h6>Malaria Cases</h6></div>
+          <div class="card-body" style="position:relative;min-height:260px;padding:12px;">
+            <div id="demoBanner1" class="demo-banner">⚠ Sample data — preview mode</div>
+            <div id="loading1" class="d-flex align-items-center justify-content-center" style="min-height:220px;">
+              <div class="spinner-border text-primary" role="status"></div>
+            </div>
+            <div id="error1" style="display:none;background:#f8d7da;color:#721c24;border:1px solid #f5c6cb;
+              border-radius:4px;padding:10px;font-size:13px;margin-top:8px;"></div>
+            <canvas id="chart1" style="display:none;"></canvas>
+          </div>
+        </div>
+      </div>
+      <script>
+        let chart1Inst = null;
+        function renderChart1Sample(cvs) {
+          if (chart1Inst) { chart1Inst.destroy(); chart1Inst = null; }
+          chart1Inst = new Chart(cvs.getContext('2d'), {
+            type: 'bar',
+            data: {
+              labels: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
+              datasets: [{label:'Cases', data:[120,145,98,167,134,189,210,156,143,178,192,165], backgroundColor:'#3498db'}]
+            },
+            options: { responsive:true, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}} }
+          });
+        }
+        function renderChart1Real(cvs, d) {
+          if (chart1Inst) { chart1Inst.destroy(); chart1Inst = null; }
+          const peIdx=d.headers.findIndex(h=>h.name==='pe');
+          const ouIdx=d.headers.findIndex(h=>h.name==='ou');
+          const valIdx=d.headers.findIndex(h=>h.name==='value');
+          let labels,vals;
+          if (''==='y') {
+            const ouMap={};
+            d.rows.forEach(r=>{const name=d.metaData?.items?.[r[ouIdx]]?.name||r[ouIdx];ouMap[name]=(ouMap[name]||0)+(parseFloat(r[valIdx])||0);});
+            labels=Object.keys(ouMap); vals=Object.values(ouMap);
+          } else {
+            const periods=[...new Set(d.rows.map(r=>r[peIdx]))].sort();
+            labels=periods.map(formatPeriodLabel);
+            vals=periods.map(p=>{const row=d.rows.find(r=>r[peIdx]===p);return row?parseFloat(row[valIdx])||0:0;});
+          }
+          chart1Inst=new Chart(cvs.getContext('2d'),{
+            type:'bar',
+            data:{labels,datasets:[{label:'Value',data:vals,backgroundColor:'#3498db',borderColor:'#3498db',
+              fill:false,tension:0.3}]},
+            options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
+          });
+        }
+        async function initChart1(ou,pe) {
+          document.getElementById('loading1').style.display='none';
+          const cvs=document.getElementById('chart1'); cvs.style.display='block';
+          if(PREVIEW){document.getElementById('demoBanner1').style.display='block';renderChart1Sample(cvs);return;}
+          document.getElementById('demoBanner1').style.display='none';
+          try {
+            const d=await dhis2Get('api/analytics.json?dimension=dx:nHeYB3qbpTe&dimension=pe:'+encodeURIComponent(pe)+'&dimension=ou:'+encodeURIComponent(ou)+'&displayProperty=NAME');
+            if(!d.rows||!d.rows.length){document.getElementById('error1').textContent='No data.';document.getElementById('error1').style.display='block';return;}
+            renderChart1Real(cvs,d);
+          } catch(e) {
+            console.error('[Chart1]',e);
+            document.getElementById('error1').textContent='Failed to load: '+e.message;
+            document.getElementById('error1').style.display='block';
+          }
+        }
+        (function() {
+          const _customOpts1 = {"plugins": {"datalabels": {"display": true, "color": "#fff", "anchor": "center", "align": "center"}}, "datasets": [{"backgroundColor": "#27ae60", "borderColor": "#27ae60"}], "scales": {"y": {"beginAtZero": true}}};
+          const _origInit1 = initChart1;
+          initChart1 = async function(ou, pe) {
+            await _origInit1(ou, pe);
+            const inst = chart1Inst;
+            if (!inst || !Object.keys(_customOpts1).length) return;
+            const merge = (t, s) => {
+              Object.keys(s).forEach(k => {
+                if (k === 'datasets' && Array.isArray(s[k])) {
+                  (inst.data.datasets || []).forEach((ds, i) => {
+                    const p = s[k][0] || {};
+                    Object.assign(ds, p);
+                  });
+                } else if (s[k] && typeof s[k] === 'object' && !Array.isArray(s[k]) && t[k]) {
+                  merge(t[k], s[k]);
+                } else {
+                  t[k] = s[k];
+                }
+              });
+            };
+            merge(inst.options, _customOpts1);
+            inst.update();
+          };
+        })();
+      </script>
+      <!-- CARD-END:card_1 -->
+
+    </div>
+  </div>
+  <script>
+  const PREVIEW = window.location.protocol === 'file:';
+
+  // Disable datalabels plugin globally by default (enable per-chart via custom_options)
+  if (window.ChartDataLabels) {
+    Chart.defaults.plugins.datalabels = { display: false };
+  }
+
+  async function dhis2Get(path) {
+    const r = await fetch('../' + path, {credentials:'include'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+
+  function resolveRelativePeriod(pe) {
+    const now = new Date(), y = now.getFullYear(), m = now.getMonth()+1;
+    const pad = n => String(n).padStart(2,'0');
+    const pm = i => { let mo=m-i,yr=y; while(mo<=0){mo+=12;yr--;} return yr+pad(mo); };
+    const q = Math.ceil(m/3);
+    switch(pe) {
+      case 'LAST_MONTH':     return pm(1);
+      case 'LAST_3_MONTHS':  return [1,2,3].map(pm).join(';');
+      case 'LAST_6_MONTHS':  return [1,2,3,4,5,6].map(pm).join(';');
+      case 'LAST_12_MONTHS': return [1,2,3,4,5,6,7,8,9,10,11,12].map(pm).join(';');
+      case 'THIS_QUARTER':   return y+'Q'+q;
+      case 'LAST_QUARTER':   { let lq=q-1,yr=y; if(lq<=0){lq=4;yr--;} return yr+'Q'+lq; }
+      case 'THIS_YEAR':      return String(y);
+      case 'LAST_YEAR':      return String(y-1);
+      default: return pe;
+    }
+  }
+
+  async function loadOrgUnits() {
+    const sel = document.getElementById('ouSelect');
+    sel.innerHTML = '';
+    const sg = document.createElement('optgroup'); sg.label='User organisation unit';
+    [['User organisation unit','USER_ORGUNIT'],['User sub-units','USER_ORGUNIT_CHILDREN'],
+     ['User sub-x2-units','USER_ORGUNIT_GRANDCHILDREN']].forEach(([l,v])=>sg.appendChild(new Option(l,v)));
+    sel.appendChild(sg); sel.value='USER_ORGUNIT';
+    try {
+      const me = await dhis2Get('api/me.json?fields=organisationUnits[id,displayName,level]');
+      const ous = (me.organisationUnits||[]).sort((a,b)=>a.displayName.localeCompare(b.displayName));
+      if (ous.length) {
+        const mg=document.createElement('optgroup'); mg.label='Org units';
+        ous.forEach(o=>mg.appendChild(new Option(o.displayName,o.id)));
+        sel.appendChild(mg);
+      }
+    } catch(e) { console.error('[OU]',e); }
+  }
+
+  function generatePeriods() {
+    const sel = document.getElementById('peSelect');
+    sel.innerHTML='';
+    const rel=document.createElement('optgroup'); rel.label='Relative';
+    [['Last month','LAST_MONTH'],['Last 3 months','LAST_3_MONTHS'],['Last 6 months','LAST_6_MONTHS'],
+     ['Last 12 months','LAST_12_MONTHS'],['This quarter','THIS_QUARTER'],['Last quarter','LAST_QUARTER'],
+     ['This year','THIS_YEAR'],['Last year','LAST_YEAR']].forEach(([l,v])=>rel.appendChild(new Option(l,v)));
+    sel.appendChild(rel);
+    const now=new Date(),y=now.getFullYear(),m=now.getMonth()+1;
+    const mf=document.createElement('optgroup'); mf.label='Monthly';
+    for(let i=0;i<12;i++){let mo=m-i,yr=y;if(mo<=0){mo+=12;yr--;}mf.appendChild(new Option('Month '+mo+'/'+yr,yr+String(mo).padStart(2,'0')));}
+    sel.appendChild(mf);
+    const qf=document.createElement('optgroup'); qf.label='Quarterly';
+    for(let i=0;i<8;i++){let q=Math.ceil(m/3)-i,yr=y;if(q<=0){q+=4;yr--;}qf.appendChild(new Option('Q'+q+' '+yr,yr+'Q'+q));}
+    sel.appendChild(qf);
+    const yf=document.createElement('optgroup'); yf.label='Yearly';
+    for(let yr=y;yr>=y-4;yr--)yf.appendChild(new Option(String(yr),String(yr)));
+    sel.appendChild(yf);
+    sel.value='LAST_12_MONTHS';
+  }
+
+  function formatPeriodLabel(pe) {
+    const mm=pe.match(/^(\d{4})(\d{2})$/);
+    if(mm){const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return M[parseInt(mm[2],10)-1]+' '+mm[1];}
+    const qm=pe.match(/^(\d{4})Q(\d)$/);
+    if(qm) return 'Q'+qm[2]+' '+qm[1];
+    return pe;
+  }
+
+  const PALETTE=['#e74c3c','#3498db','#f39c12','#27ae60','#9b59b6','#1abc9c','#e67e22','#2980b9','#8e44ad','#16a085'];
+
+  async function loadData() {
+    const ou=document.getElementById('ouSelect').value;
+    const pe=document.getElementById('peSelect').value;
+    const btn=document.getElementById('loadBtn');
+    btn.disabled=true; btn.textContent='⏳ Loading...';
+    try {
+      await Promise.all([initChart1(ou,pe)]);
+      document.getElementById('lastUpdated').textContent='Updated: '+new Date().toLocaleTimeString();
+    } finally { btn.disabled=false; btn.textContent='↻ Load data'; }
+  }
+
+  document.addEventListener('DOMContentLoaded', async ()=>{
+    generatePeriods();
+    if (PREVIEW) {
+      const sel=document.getElementById('ouSelect');
+      [['User organisation unit','USER_ORGUNIT'],['User sub-units','USER_ORGUNIT_CHILDREN'],
+       ['User sub-x2-units','USER_ORGUNIT_GRANDCHILDREN']].forEach(([l,v])=>sel.appendChild(new Option(l,v)));
+      sel.value='USER_ORGUNIT';
+      await loadData();
+      return;
+    }
+    try { await loadOrgUnits(); await loadData(); } catch(e) { console.error('Init error:',e); }
+  });
+
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

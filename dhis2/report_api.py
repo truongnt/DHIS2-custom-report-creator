@@ -19,9 +19,11 @@ _DEFAULT_RELATIVE_PERIODS = {
     "last12Months": True,
 }
 
+# Both set to False so DHIS2 runs the report directly without prompting user to pick org/period.
+# The report HTML already has hardcoded analytics calls with the right filters.
 _DEFAULT_REPORT_PARAMS = {
-    "reportingPeriod": True,
-    "organisationUnit": True,
+    "reportingPeriod": False,
+    "organisationUnit": False,
 }
 
 

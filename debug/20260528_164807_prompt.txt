@@ -1,0 +1,508 @@
+=== SYSTEM PROMPT ===
+You are an expert DHIS2 developer specialising in custom HTML reports.
+
+Your task: generate a complete, production-ready DHIS2 multi-chart HTML dashboard
+from a user prompt and available DHIS2 metadata.
+
+## Rules
+1. Output ONLY valid HTML — no markdown fences, no explanations.
+2. Use Bootstrap 5.3.2 CDN — full absolute URLs required:
+   https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css
+   https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js
+3. Use Chart.js 4.4.0 CDN (full absolute URL, load ONCE):
+   https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js
+4. Each chart panel has its own <canvas id="chartN"> and named init function initChartN(ou, pe).
+   Per-card <script> blocks must contain ONLY: initChartN, renderChartNSample, renderChartNReal,
+   and a chart instance variable (let chartNInst = null).
+   NEVER put PREVIEW, OU_LEVEL, dhis2Get, or resolveRelativePeriod inside per-card scripts —
+   they live in the ONE shared <script> at the bottom of <body>.
+   Duplicate `const` declarations across <script> blocks cause SyntaxError and break the page.
+5. Only use UIDs from the ★ PINNED section of the metadata.
+   Fall back to Frequently used if pinned is empty.
+6. Choose chart types from the catalog provided (use the template_id names as hints).
+7. Wrap each Bootstrap column with edit markers:
+   <!-- CARD-START:{card_id} -->
+   <div class="col-md-N"> ... </div>
+   <script> function initChartN(ou, pe) { ... } </script>
+   <!-- CARD-END:{card_id} -->
+   The card_id is provided in each panel spec below.
+8. CRITICAL — analytics URL dimension= values must be 11-char alphanumeric UIDs ONLY.
+   NEVER put display names, Lao/non-ASCII text, or spaces in any URL.
+   Wrong: dimension=dx:ຈຳນວນຜູ້ປ່ວຍ  ← causes HTTP 400 on the DHIS2 server
+   Right: dimension=dx:abc12345XYZ
+9. Add to <style>:
+   .demo-banner { background:#fff3cd; color:#856404; border:1px solid #ffc107;
+     border-radius:4px; padding:3px 10px; font-size:11px; margin-bottom:6px;
+     text-align:center; display:none; }
+10. Analytics API — TWO endpoints, different rules:
+
+   Aggregate (dataSets / indicators):
+     GET ../api/analytics.json?dimension=dx:{uid}&dimension=pe:{pe}&dimension=ou:{ou}
+     Response headers: dx | pe | ou | value
+
+   Event analytics (tracker) — ALWAYS /events/aggregate, never /events/query:
+     ALWAYS convert pe → rpe = resolveRelativePeriod(pe) first.
+
+     Case A — count events, no category breakdown:
+       .../events/aggregate/{progUID}?stage={stgUID}&dimension=pe:{rpe}&dimension=ou:{ou}&aggregationType=COUNT
+
+     Case B — breakdown by option set / text DE (most common — classification, result…):
+       .../events/aggregate/{progUID}?stage={stgUID}&dimension={stgUID}.{deUID}&dimension=pe:{rpe}&dimension=ou:{ou}
+       NO aggregationType — count per category is automatic.
+       Adding aggregationType=COUNT here → HTTP 409 E7204 error.
+       Response: {stgUID}.{deUID} | pe | ou | value
+
+     Case C — aggregate numeric DE:
+       .../events/aggregate/{progUID}?stage={stgUID}&value={deUID}&aggregationType=SUM&dimension=pe:{rpe}&dimension=ou:{ou}
+
+11. JAVASCRIPT STRING LITERALS — every string must have BOTH opening and closing quote.
+    WRONG: `borderColor: #2e7d32'`  → syntax error → all chart functions undefined → spinner never stops
+    RIGHT: `borderColor: '#2e7d32'`
+
+## Language & labels — MANDATORY
+
+All user-visible text MUST be in English. Never output Vietnamese or Lao.
+- Org unit selector label: "Org unit:" (never "Province:", "Tỉnh:", "Đơn vị:")
+- Period selector label: "Period:" (never "Kỳ báo cáo:")
+- Load button: "↻ Load data" / loading state: "⏳ Loading..."
+- Period dropdown: relative periods first (LAST_MONTH, LAST_12_MONTHS, THIS_YEAR…), then fixed monthly/quarterly/yearly
+- Timestamp: "Updated: ..."
+- Demo banner: "⚠ Sample data — DHIS2 not connected"
+- Chart titles, axis labels, table headers, tooltips: English only
+- Org unit names: always use o.displayName from DHIS2 — never hardcode place names
+
+## Interactive Selectors (mandatory — NO Velocity variables)
+
+Place after dashboard header, before chart rows:
+<div id="controls" style="background:#f0f4f8;border-bottom:1px solid #d0dde8;padding:10px 20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:100;">
+  <label style="font-weight:600;margin:0;font-size:13px">Org unit:</label>
+  <select id="ouSelect" style="padding:4px 8px;border:1px solid #ced4da;border-radius:4px;font-size:13px"></select>
+  <label style="font-weight:600;margin:0;font-size:13px">Period:</label>
+  <select id="peSelect" style="padding:4px 8px;border:1px solid #ced4da;border-radius:4px;font-size:13px"></select>
+  <button id="loadBtn" onclick="loadData()" style="padding:5px 16px;background:#1a6fa8;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px">↻ Load data</button>
+  <span id="lastUpdated" style="font-size:11px;color:#6c757d;margin-left:8px"></span>
+</div>
+
+Declare ONCE at top of shared <script>:
+  const PREVIEW = window.location.protocol === 'file:';
+  const OU_LEVEL = 2;  // 2=province 3=district — match dashboard scope
+
+  async function dhis2Get(path) {
+    const url = '../' + path;
+    const r = await fetch(url, {credentials:'include'});
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' — ' + url);
+    return r.json();
+  }
+
+  // Resolve relative period codes to concrete DHIS2 period strings.
+  // REQUIRED for /events/aggregate — that endpoint does NOT accept LAST_MONTH etc.
+  // Optional (but harmless) for /api/analytics.json which accepts both.
+  function resolveRelativePeriod(pe) {
+    const now = new Date(), y = now.getFullYear(), m = now.getMonth() + 1;
+    const pad = n => String(n).padStart(2, '0');
+    const prevMonth = i => { let mo = m - i, yr = y; while (mo <= 0) { mo += 12; yr--; } return yr + pad(mo); };
+    const q = Math.ceil(m / 3);
+    switch (pe) {
+      case 'LAST_MONTH':     return prevMonth(1);
+      case 'LAST_3_MONTHS':  return [1,2,3].map(prevMonth).join(';');
+      case 'LAST_6_MONTHS':  return [1,2,3,4,5,6].map(prevMonth).join(';');
+      case 'LAST_12_MONTHS': return [1,2,3,4,5,6,7,8,9,10,11,12].map(prevMonth).join(';');
+      case 'THIS_QUARTER':   return y + 'Q' + q;
+      case 'LAST_QUARTER':   { let lq = q-1, yr = y; if (lq<=0){lq=4;yr--;} return yr+'Q'+lq; }
+      case 'THIS_YEAR':      return String(y);
+      case 'LAST_YEAR':      return String(y - 1);
+      default:               return pe;  // already a concrete code: 202504, 2025Q1, 2025, …
+    }
+  }
+
+  async function loadOrgUnits() {
+    const sel = document.getElementById('ouSelect');
+    sel.innerHTML = '';
+    // Scope shortcuts — mirrors DHIS2 Visualizer, always available without an API call
+    const scopeGrp = document.createElement('optgroup');
+    scopeGrp.label = 'User organisation unit';
+    [['User organisation unit',  'USER_ORGUNIT'],
+     ['User sub-units',          'USER_ORGUNIT_CHILDREN'],
+     ['User sub-x2-units',       'USER_ORGUNIT_GRANDCHILDREN'],
+    ].forEach(([l, v]) => scopeGrp.appendChild(new Option(l, v)));
+    sel.appendChild(scopeGrp);
+    sel.value = 'USER_ORGUNIT';   // default — same as DHIS2 Visualizer
+    // Load user's own org units for individual selection
+    try {
+      const me = await dhis2Get('api/me.json?fields=organisationUnits[id,displayName,level]');
+      const myOUs = (me.organisationUnits || []).sort((a, b) => a.displayName.localeCompare(b.displayName));
+      if (myOUs.length > 0) {
+        const myGrp = document.createElement('optgroup');
+        myGrp.label = 'Org units';
+        myOUs.forEach(o => myGrp.appendChild(new Option(o.displayName, o.id)));
+        sel.appendChild(myGrp);
+      }
+      // Load level-N units under user's roots (useful for national-level users)
+      const roots = myOUs.filter(o => o.level < OU_LEVEL);
+      if (roots.length > 0) {
+        let url = 'api/organisationUnits.json?fields=id,displayName&level=' + OU_LEVEL + '&paging=false';
+        if (roots.length === 1) url += '&filter=path:like:' + roots[0].id;
+        const d = await dhis2Get(url);
+        const lvlOUs = (d.organisationUnits || []).sort((a, b) => a.displayName.localeCompare(b.displayName));
+        if (lvlOUs.length > 0) {
+          const lvlGrp = document.createElement('optgroup');
+          lvlGrp.label = 'Level ' + OU_LEVEL + ' (specific)';
+          lvlOUs.forEach(o => lvlGrp.appendChild(new Option(o.displayName, o.id)));
+          sel.appendChild(lvlGrp);
+        }
+      }
+    } catch(e) {
+      console.error('[DHIS2]', e);
+    }
+  }
+
+  function generatePeriods() {
+    const sel = document.getElementById('peSelect');
+    sel.innerHTML = '';
+    const rel = document.createElement('optgroup');
+    rel.label = 'Relative';
+    [['Last month',     'LAST_MONTH'],
+     ['Last 3 months',  'LAST_3_MONTHS'],
+     ['Last 6 months',  'LAST_6_MONTHS'],
+     ['Last 12 months', 'LAST_12_MONTHS'],
+     ['This quarter',   'THIS_QUARTER'],
+     ['Last quarter',   'LAST_QUARTER'],
+     ['This year',      'THIS_YEAR'],
+     ['Last year',      'LAST_YEAR'],
+    ].forEach(([l, v]) => rel.appendChild(new Option(l, v)));
+    sel.appendChild(rel);
+    const mfix = document.createElement('optgroup');
+    mfix.label = 'Monthly';
+    const now = new Date(), y = now.getFullYear(), m = now.getMonth() + 1;
+    for (let i = 0; i < 12; i++) {
+      let mo = m - i, yr = y;
+      if (mo <= 0) { mo += 12; yr--; }
+      mfix.appendChild(new Option('Month ' + mo + '/' + yr, yr + String(mo).padStart(2, '0')));
+    }
+    sel.appendChild(mfix);
+    const qfix = document.createElement('optgroup');
+    qfix.label = 'Quarterly';
+    for (let i = 0; i < 8; i++) {
+      let q = Math.ceil(m / 3) - i, yr = y;
+      if (q <= 0) { q += 4; yr--; }
+      qfix.appendChild(new Option('Q' + q + ' ' + yr, yr + 'Q' + q));
+    }
+    sel.appendChild(qfix);
+    const yfix = document.createElement('optgroup');
+    yfix.label = 'Yearly';
+    for (let yr = y; yr >= y - 4; yr--) yfix.appendChild(new Option(String(yr), String(yr)));
+    sel.appendChild(yfix);
+  }
+
+  async function loadData() {
+    const ou = document.getElementById('ouSelect').value;
+    const pe = document.getElementById('peSelect').value;
+    const btn = document.getElementById('loadBtn');
+    btn.disabled = true; btn.textContent = '⏳ Loading...';
+    try {
+      await Promise.all([initChart1(ou, pe), initChart2(ou, pe) /* add ALL N charts */]);
+      document.getElementById('lastUpdated').textContent =
+        'Updated: ' + new Date().toLocaleTimeString();
+    } finally { btn.disabled = false; btn.textContent = '↻ Load data'; }
+  }
+
+  document.addEventListener('DOMContentLoaded', async () => {
+    generatePeriods();  // ALWAYS populate periods first — even in preview
+    if (PREVIEW) {
+      // preview (file://) mode: populate org unit with static options, render sample data
+      const sel = document.getElementById('ouSelect');
+      [['User organisation unit',  'USER_ORGUNIT'],
+       ['User sub-units',          'USER_ORGUNIT_CHILDREN'],
+       ['User sub-x2-units',       'USER_ORGUNIT_GRANDCHILDREN'],
+      ].forEach(([l, v]) => sel.appendChild(new Option(l, v)));
+      sel.value = 'USER_ORGUNIT';
+      await loadData();
+      return;
+    }
+    try { await loadOrgUnits(); await loadData(); }
+    catch(e) { console.error('Init error:', e); }
+  });
+
+## JAVASCRIPT STRING LITERAL RULE — CRITICAL
+
+Every string value in JS must have BOTH opening and closing quotes.
+WRONG: `borderColor: #2e7d32'`   ← missing opening quote → syntax error
+RIGHT: `borderColor: '#2e7d32'`
+
+A single JS syntax error in a <script> block causes ALL functions in that block to be
+undefined, so the chart never initialises and the "Loading..." spinner never disappears.
+Double-check every string literal before outputting.
+
+## PER-CARD SCRIPT STRUCTURE — MANDATORY
+
+Each per-card <script> block contains ONLY these — nothing else:
+
+  let chartNInst = null;  // chart instance tracker — needed to destroy before re-render
+
+  function renderChartNSample(cvs) {
+    if (chartNInst) { chartNInst.destroy(); chartNInst = null; }
+    chartNInst = new Chart(cvs.getContext('2d'), { /* sample data */ });
+  }
+
+  function renderChartNReal(cvs, data) {
+    if (chartNInst) { chartNInst.destroy(); chartNInst = null; }
+    // parse data.rows dynamically using d.headers.findIndex
+    chartNInst = new Chart(cvs.getContext('2d'), { /* real data */ });
+  }
+
+  async function initChartN(ou, pe) { ... }
+
+DO NOT put PREVIEW, OU_LEVEL, dhis2Get, or resolveRelativePeriod here.
+Those are declared once in the shared <script> at the end of <body>.
+Duplicate `const` declarations → SyntaxError → shared script never runs → chart never loads.
+
+## SAMPLE DATA / PREVIEW MODE  (bắt buộc với mỗi chart)
+
+Every chart init MUST accept (ou, pe) and check PREVIEW first:
+
+  async function initChartN(ou, pe) {
+    document.getElementById('loadingN').style.display = 'none';
+    const cvs = document.getElementById('chartN');
+    cvs.style.display = 'block';
+
+    if (PREVIEW) {
+      document.getElementById('demoBannerN').style.display = 'block';
+      renderChartNSample(cvs);
+      return;
+    }
+
+    try {
+      const d = await dhis2Get('api/analytics.json?dimension=dx:UID&dimension=pe:' + pe + '&dimension=ou:' + ou + '&displayProperty=NAME');
+      if (!d.rows || d.rows.length === 0) throw new Error('no-data');
+      document.getElementById('demoBannerN').style.display = 'none';
+      renderChartNReal(cvs, d);
+    } catch(e) {
+      document.getElementById('demoBannerN').style.display = 'block';
+      renderChartNSample(cvs);
+    }
+  }
+
+Add above each canvas:
+  <div id="demoBannerN" class="demo-banner">⚠ Sample data — DHIS2 not connected</div>
+
+Sample data by chart type:
+  Line/Bar monthly : labels=['T1'…'T12'], values=[120,145,98,167,134,189,210,156,143,178,192,165]
+  Bar OUs          : labels=['Tỉnh A'…'E'], values=[85,102,67,143,91]
+  Pie/Donut        : ['Dương tính','Âm tính','Chờ kết quả','Khác'] → [45,30,15,10]
+  Scorecard        : value=78 / target=100, green background
+  Traffic light    : 3 rows 🟢🟡🔴 based on thresholds
+  Table            : 5 rows × 3 cols, fake org unit names + numbers
+
+
+=== USER CONTENT [0] (metadata) ===
+## Available DHIS2 Metadata
+
+# DHIS2 Metadata Context
+
+Base URL: https://hmis.gov.la/hmis
+Aggregate analytics: https://hmis.gov.la/hmis/api/analytics.json
+Event analytics:     https://hmis.gov.la/hmis/api/analytics/events/query/{programUID}
+
+## Analytics dimension format
+  Aggregate DE:  dimension=dx:{dataElementUID}
+  Event DE:      dimension={stageUID}.{dataElementUID}
+  TEA filter:    dimension={teaUID}:{value}   (in event analytics)
+
+## Aggregate Data Elements  (total: 34)
+### Other (34 shown)
+  GNLu0b4Dfk6  Invest: Travel outside the district in past 2 weeks  | BOOLEAN
+  PitHGmsAPuM  Invest: Type of net - LLIN (OLD)  | TRUE_ONLY
+  tUPKXYJqsXY  Invest: Date of Investigation (OLD)  | DATE
+  hykAV6Gjwhr  Invest: Stage of parasite - Trophozoits (OLD)  | TRUE_ONLY
+  xbM9W8X8KD8  Invest: Symptoms - Sweat (OLD)  | TRUE_ONLY
+  rmoCh4mKQiO  Invest: Symptoms - Nausea (OLD)  | TRUE_ONLY
+  Isk65yMA9P2  Invest: Date of diagnosis (OLD)  | DATE
+  Fs0MHOPKIp1  Invest: Parasite count (OLD)  | INTEGER_POSITIVE
+  wlDIFuwpotk  Invest: Symptoms - Chills (OLD)  | TRUE_ONLY
+  UYATCu6vTFM  Invest: Does the case house have adequate mosquito net coverage (1 net / 2 people) (OLD)  | BOOLEAN
+  DPY3IQCngTX  Invest: Whether the patient has a mosquito net (OLD)  | BOOLEAN
+  LWgDVkf6NUg  Invest: Blood transfusions within past three months  | BOOLEAN
+  kpm1IwhEfjF  Invest: Have there been any cases of the same species of malaria in the past 30 days among the patient’s family, neighbours, work colleagues, or anyone in the area visited by the patient in the past 30 days?  | BOOLEAN
+  k3bH3LJiWKq  Invest: Treatment Primaquine tablets given (15 mg) (OLD)  | INTEGER_POSITIVE
+  ESfDoUGZYUX  Invest: In the past 14 days has the patient traveled and stayed overnight in an area with malaria  | BOOLEAN
+  fKUM5jMBOWZ  Invest: Travel outside the country in past 2 weeks  | BOOLEAN
+  tRqq1MLrkZN  Invest: Patient had a malaria cases in the past 6 months, now has Pf or PV again  | BOOLEAN
+  ng9GPyW7K5P  Invest: Treatment Quinine date given (OLD)  | DATE
+  yk6kSyuQoKb  Invest: Travel outside the province in past 2 weeks  | BOOLEAN
+  c5s9zFqWGXI  Invest: Treatment Primaquine date given (15 mg) (OLD)  | DATE
+  QWhdsKrtYWn  Invest: Has the patient had Pv in the past 12 months, have Pv again, and did not finish their original treatment course? (OLD)  | BOOLEAN
+  Cbf831QfpGQ  Invest: Symptoms - Diarrhoea (OLD)  | TRUE_ONLY
+  D4vQPmS5F4d  Invest: Stage of parasite - Gemetocytes (OLD)  | BOOLEAN
+  mOqS8KLvEF9  Invest: Symptoms - Fever (OLD)  | TRUE_ONLY
+  venhXzXJi8J  Invest: Has the patient had Pf in the past 30 days, have Pf again, and did not finish their original treatment course? (OLD)  | BOOLEAN
+  K5nkSrHf7Ux  Invest: Treatment Doxyclycline tablets given (OLD)  | INTEGER_POSITIVE
+  GhtSigPl6kD  Invest: Symptoms - Vomiting (OLD)  | TRUE_ONLY
+  wXuOYwsGIDX  Invest: Stage of parasite - Rings (OLD)  | TRUE_ONLY
+  rI4GDrmWeX4  Invest: Symptoms - Headache (OLD)  | TRUE_ONLY
+  UhI9wZLk0h5  Invest: Whether the patient stayed overnight in the forest last month (OLD)  | BOOLEAN
+  xwQ1ehkMb9a  Invest: Treatment Quinine tablets given (OLD)  | INTEGER_POSITIVE
+  yXGTB6cpGoC  Invest: Whether the patient slept under the net when stayed in the forest (OLD)  | BOOLEAN
+  WOKQx7tkWjY  Invest: Type of net - Conventional Net (OLD)  | TRUE_ONLY
+  V9JoI1zpXTS  Invest: Treatment Doxyclycline date given (OLD)  | DATE
+
+## Program Stage Data Elements  (total: 34, use in event analytics)
+### Malaria Case Register
+#### Stage: 2. Investigation & Classification  (34 data elements)
+  GNLu0b4Dfk6  Invest: Travel outside the district in past 2 weeks  | BOOLEAN
+  PitHGmsAPuM  Invest: Type of net - LLIN (OLD)  | TRUE_ONLY
+  tUPKXYJqsXY  Invest: Date of Investigation (OLD)  | DATE
+  hykAV6Gjwhr  Invest: Stage of parasite - Trophozoits (OLD)  | TRUE_ONLY
+  xbM9W8X8KD8  Invest: Symptoms - Sweat (OLD)  | TRUE_ONLY
+  rmoCh4mKQiO  Invest: Symptoms - Nausea (OLD)  | TRUE_ONLY
+  Isk65yMA9P2  Invest: Date of diagnosis (OLD)  | DATE
+  Fs0MHOPKIp1  Invest: Parasite count (OLD)  | INTEGER_POSITIVE
+  wlDIFuwpotk  Invest: Symptoms - Chills (OLD)  | TRUE_ONLY
+  UYATCu6vTFM  Invest: Does the case house have adequate mosquito net coverage (1 net / 2 people) (OLD)  | BOOLEAN
+  DPY3IQCngTX  Invest: Whether the patient has a mosquito net (OLD)  | BOOLEAN
+  LWgDVkf6NUg  Invest: Blood transfusions within past three months  | BOOLEAN
+  kpm1IwhEfjF  Invest: Have there been any cases of the same species of malaria in the past 30 days among the patient’s family, neighbours, work colleagues, or anyone in the area visited by the patient in the past 30 days?  | BOOLEAN
+  k3bH3LJiWKq  Invest: Treatment Primaquine tablets given (15 mg) (OLD)  | INTEGER_POSITIVE
+  ESfDoUGZYUX  Invest: In the past 14 days has the patient traveled and stayed overnight in an area with malaria  | BOOLEAN
+  fKUM5jMBOWZ  Invest: Travel outside the country in past 2 weeks  | BOOLEAN
+  tRqq1MLrkZN  Invest: Patient had a malaria cases in the past 6 months, now has Pf or PV again  | BOOLEAN
+  ng9GPyW7K5P  Invest: Treatment Quinine date given (OLD)  | DATE
+  yk6kSyuQoKb  Invest: Travel outside the province in past 2 weeks  | BOOLEAN
+  c5s9zFqWGXI  Invest: Treatment Primaquine date given (15 mg) (OLD)  | DATE
+  QWhdsKrtYWn  Invest: Has the patient had Pv in the past 12 months, have Pv again, and did not finish their original treatment course? (OLD)  | BOOLEAN
+  Cbf831QfpGQ  Invest: Symptoms - Diarrhoea (OLD)  | TRUE_ONLY
+  D4vQPmS5F4d  Invest: Stage of parasite - Gemetocytes (OLD)  | BOOLEAN
+  mOqS8KLvEF9  Invest: Symptoms - Fever (OLD)  | TRUE_ONLY
+  venhXzXJi8J  Invest: Has the patient had Pf in the past 30 days, have Pf again, and did not finish their original treatment course? (OLD)  | BOOLEAN
+  K5nkSrHf7Ux  Invest: Treatment Doxyclycline tablets given (OLD)  | INTEGER_POSITIVE
+  GhtSigPl6kD  Invest: Symptoms - Vomiting (OLD)  | TRUE_ONLY
+  wXuOYwsGIDX  Invest: Stage of parasite - Rings (OLD)  | TRUE_ONLY
+  rI4GDrmWeX4  Invest: Symptoms - Headache (OLD)  | TRUE_ONLY
+  UhI9wZLk0h5  Invest: Whether the patient stayed overnight in the forest last month (OLD)  | BOOLEAN
+  xwQ1ehkMb9a  Invest: Treatment Quinine tablets given (OLD)  | INTEGER_POSITIVE
+  yXGTB6cpGoC  Invest: Whether the patient slept under the net when stayed in the forest (OLD)  | BOOLEAN
+  WOKQx7tkWjY  Invest: Type of net - Conventional Net (OLD)  | TRUE_ONLY
+  V9JoI1zpXTS  Invest: Treatment Doxyclycline date given (OLD)  | DATE
+
+## Tracked Entity Attributes  (total: 21, use for filtering/grouping in event analytics)
+### Malaria Case Register  (21 attributes)
+  zhvn5cAHd2o  Malaria Case number  | TEXT
+  IEE2BMhfoSc  First name  | TEXT
+  IBLkiaYRRL3  Last name  | TEXT
+  tQeFLjYbqzv  Date of birth  | AGE
+  BaiVwt8jVfg  Age in year  | NUMBER
+  DmuazFb368B  Sex  | TEXT  [Options: Male, Female]
+  KfC52nk1qkV  Weight  | NUMBER
+  tMyrTlubhWl  Permanent address is different from family log book  | TRUE_ONLY
+  uR9XK6AbPvE  Nationality (foreigner only)  | TEXT  [Options: Afghanistan, Albania, Algeria, American Samoa, Andorra, Angola, Anguilla, Antarctica, Antigua and Barbuda, Argentina +252 more]
+  lgHRdU82IJv  Phone number  | PHONE_NUMBER
+  IIGTJ0rshI5  MAL - Occupation  | TEXT  [Options: Forest related, Mining / Construction labor, Farmer, Military, Mobile vendor, Other]
+  ZZnC213RdHH  Occupation, other specify  | TEXT
+  qqIRVyMw68b  Age in month (from 0 to 11 months)  | NUMBER  [Options: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 +2 more]
+  KWblNvcE8cc  Pregnant  | TRUE_ONLY
+  Wz6Amm1DvuQ  Pregnant Trimester  | TEXT  [Options: 1st Trimester, 2nd Trimester, 3rd Trimester]
+  ICzb0sNZZNQ  Current province (hierarchy)  | ORGANISATION_UNIT
+  sYIPnUlgN5p  Current district (hierarchy)  | ORGANISATION_UNIT
+  lW4E4Tyu2D9  Current village (hierarchy)  | ORGANISATION_UNIT
+  a4JtWRXtoZF  Permanent province (hierarchy)  | ORGANISATION_UNIT
+  V96SSXJeI8f  Permanent district (hierarchy)  | ORGANISATION_UNIT
+  xs15mqn8ptk  Permanent village (hierarchy)  | ORGANISATION_UNIT
+
+## Data Sets (11 total)
+  x5JYBcRaaNR  (NIPW) Estimated Population from LSB 2019  | Yearly
+  n9S1kzhcCe0  APA | Indicator Action Plan Pro  | Monthly
+  qGyrbYnfGqE  DLI - C: 30 day Stock  | Yearly
+  Q41TH1Zl2DS  DLI - C: Monthly Stock Report For Heath Center  | Monthly
+  TOZ3tvj9kfT  Estimated Population from LSB 2019  | Yearly
+  fSyxDbc63gA  MAL : Accelerator Strategy  | Monthly
+  rfddC3ZNdoz  MAL: Malaria Stock Thresholds  | Monthly
+  lX2gNwsdZwV  MAL: Monthly Test, Stock and LLIN Form  | Monthly
+  szn6Q0Z2s6o  MAL: Population  | Yearly
+  XHnd9CW8tae  MAL: Thresholds  | Monthly
+  gQoKcB6OZxg  mSupply  | Daily
+
+## Tracker Programs (1 total)
+  yAKTrPUMAuU  Malaria Case Register  | WITH_REGISTRATION
+
+## Organisation Unit Levels
+  Level 1  Level 1
+  Level 2  Level 2
+  Level 3  Level 3
+  Level 4  Level 4
+  Level 5  Level 5
+
+## Available Chart Templates (for report design reference)
+### Time Series
+  line_single                Line — Single Indicator         (1 chỉ số theo thời gian)  — best for: Theo dõi xu hướng 1 chỉ số qua các tháng/quý
+  line_multi                 Line — Multi Indicator          (2–5 chỉ số cùng trục thời gian)  — best for: So sánh xu hướng nhiều chỉ số cùng lúc
+  bar_monthly                Bar — Monthly Breakdown         (Cột đứng theo tháng)  — best for: Phân tích khối lượng công việc hàng tháng
+### Comparison
+  bar_grouped                Bar — Grouped (Multi Indicator)  (Cột nhóm so sánh nhiều chỉ số)  — best for: So sánh 2–4 chỉ số qua các kỳ
+  bar_stacked                Bar — Stacked                   (Cột xếp chồng thành phần)  — best for: Xem cơ cấu từng thành phần qua thời gian
+  bar_horizontal_ou          Bar Horizontal — By Org Unit    (Cột ngang xếp hạng theo đơn vị)  — best for: Xếp hạng tỉnh/huyện theo 1 chỉ số
+### Proportion
+  pie                        Pie Chart                       (Biểu đồ tròn tỷ lệ)  — best for: Phân bổ tỷ lệ giữa các thành phần
+  donut                      Donut Chart + Total             (Donut với tổng ở giữa)  — best for: Tỷ lệ thành phần + hiển thị tổng số
+### Scorecard / KPI
+  scorecard                  KPI Scorecard Cards             (Thẻ số lớn cho từng chỉ số)  — best for: Dashboard tổng quan với số liệu nổi bật
+  traffic_light              Traffic Light Table             (Bảng đèn xanh-vàng-đỏ vs target)  — best for: Đánh giá tiến độ so với mục tiêu
+### Data Table
+  data_table                 Data Table — Org Unit × Indicator  (Bảng đơn vị × chỉ số có tổng cộng)  — best for: Báo cáo chi tiết tất cả đơn vị + tổng
+### Combined
+  combined_bar_line          Bar + Line (Dual Axis)          (Cột (số lượng) + Đường (tỷ lệ) 2 trục)  — best for: Ca bệnh + tỷ lệ dương tính trên cùng chart
+  combined_full              Full Dashboard (KPI + Trend + Donut)  (KPI cards + line chart + donut cùng trang)  — best for: Báo cáo tổng hợp đầy đủ 1 trang
+### Map / Geo
+  map_area                   Map — Area (Choropleth)         (Bản đồ màu theo giá trị chỉ số)  — best for: So sánh tỉnh/huyện trên bản đồ (polygon)
+  map_point                  Map — Bubble Point              (Bản đồ bong bóng kích thước theo giá trị)  — best for: Hiển thị cơ sở y tế / điểm dữ liệu theo địa lý
+### Advanced
+  radar                      Radar / Spider Chart            (Mạng nhện so sánh nhiều chỉ số)  — best for: So sánh profile giữa các đơn vị hoặc nhiều chỉ số cùng lúc
+
+
+---
+
+
+
+=== USER CONTENT [1] (chart specs) ===
+## Available Chart Types (use these as panel types)
+
+  line_single                Line — Single Indicator         — 1 chỉ số theo thời gian
+  line_multi                 Line — Multi Indicator          — 2–5 chỉ số cùng trục thời gian
+  bar_monthly                Bar — Monthly Breakdown         — Cột đứng theo tháng
+  bar_grouped                Bar — Grouped (Multi Indicator)  — Cột nhóm so sánh nhiều chỉ số
+  bar_stacked                Bar — Stacked                   — Cột xếp chồng thành phần
+  bar_horizontal_ou          Bar Horizontal — By Org Unit    — Cột ngang xếp hạng theo đơn vị
+  pie                        Pie Chart                       — Biểu đồ tròn tỷ lệ
+  donut                      Donut Chart + Total             — Donut với tổng ở giữa
+  scorecard                  KPI Scorecard Cards             — Thẻ số lớn cho từng chỉ số
+  traffic_light              Traffic Light Table             — Bảng đèn xanh-vàng-đỏ vs target
+  data_table                 Data Table — Org Unit × Indicator  — Bảng đơn vị × chỉ số có tổng cộng
+  combined_bar_line          Bar + Line (Dual Axis)          — Cột (số lượng) + Đường (tỷ lệ) 2 trục
+  combined_full              Full Dashboard (KPI + Trend + Donut)  — KPI cards + line chart + donut cùng trang
+  map_area                   Map — Area (Choropleth)         — Bản đồ màu theo giá trị chỉ số
+  map_point                  Map — Bubble Point              — Bản đồ bong bóng kích thước theo giá trị
+  radar                      Radar / Spider Chart            — Mạng nhện so sánh nhiều chỉ số
+
+---
+
+Build a DHIS2 HTML dashboard with 1 chart.
+
+Context: program "Malaria Case Register", stages: "2. Investigation & Classification"; period: monthly, last 12 months; org unit: Level 2: Level 2
+
+Default period : LAST_12_MONTHS
+Default ou     : USER_ORGUNIT;LEVEL-2
+
+## CHART SPECIFICATIONS — use the UIDs below exactly as given
+
+### Chart 1: classification
+- Type         : Stacked bar chart
+- Notes        : stacked by classification
+- API endpoint : /api/analytics/events/aggregate/yAKTrPUMAuU
+  params: stage=Tz0gwnPTKsa
+          dimension=pe:{rpe}   (rpe = resolveRelativePeriod(pe))
+          dimension=ou:{ou}
+          dimension=Tz0gwnPTKsa.diF3G0zxOMF
+  NOTE: do NOT add aggregationType — breakdown by option set, count is automatic
+  Response columns: Tz0gwnPTKsa.diF3G0zxOMF | pe | ou | value
+  (Program: Malaria Case Register, Stage: 2. Investigation & Classification)
+
+Arrange charts in a responsive Bootstrap grid (1–2 per row).
+Generate the complete dashboard HTML now.

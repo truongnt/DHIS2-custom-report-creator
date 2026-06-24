@@ -67,10 +67,10 @@ class DashboardBuilder(ctk.CTkToplevel):
                   existing_layout: list[DashCard] | None = None):
         super().__init__(parent)
         self.title("Dashboard Builder")
-        self.geometry("1200x720")
         self.minsize(900, 580)
         self.grab_set()
         self.focus_force()
+        self.after(0, lambda: self.state("zoomed"))
 
         self._metadata = metadata
         self._global_pinned = pinned   # from app-level metadata selector

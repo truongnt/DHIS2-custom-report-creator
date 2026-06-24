@@ -24,10 +24,10 @@ class FilterConfigDialog(ctk.CTkToplevel):
     def __init__(self, parent, filter_options: dict, current_cfg: dict):
         super().__init__(parent)
         self.title("Configure Metadata Filters")
-        self.geometry("980x740")
         self.minsize(800, 580)
         self.grab_set()
         self.focus_force()
+        self.after(0, lambda: self.state("zoomed"))
 
         self._opts = filter_options
         self._cfg  = dict(current_cfg)
@@ -37,12 +37,10 @@ class FilterConfigDialog(ctk.CTkToplevel):
         self._prg_vars: dict[str, tk.BooleanVar] = {}
         self._ds_vars:  dict[str, tk.BooleanVar] = {}
         # Checkbox vars — tầng 2
-        self._ind_vars: dict[str, tk.BooleanVar] = {}
         self._de_vars:  dict[str, tk.BooleanVar] = {}
         # Keyword vars
-        self._ind_name_var  = tk.StringVar(value=self._cfg.get("indicator_name", ""))
         self._de_name_var   = tk.StringVar(value=self._cfg.get("de_name", ""))
-        self._prog_name_var = tk.StringVar(value=self._cfg.get("program_indicator_name", ""))
+        self._prog_name_var = tk.StringVar(value=self._cfg.get("program_name", ""))
 
         self._build()
         self._restore_selection()
@@ -125,17 +123,13 @@ class FilterConfigDialog(ctk.CTkToplevel):
         )
         tabs.grid(row=0, column=0, sticky="nsew", padx=10, pady=(4, 2))
 
-        t_ind = tabs.add("📈 Indicator Groups")
         t_de  = tabs.add("🔢 Data Element Groups")
-        t_pi  = tabs.add("🔍 Keyword Filters")
+        t_kw  = tabs.add("🔍 Keyword Filters")
 
-        self._build_refine_groups(
-            t_ind, self._opts.get("indicator_groups", []),
-            self._ind_vars, "Indicator Groups", "count")
         self._build_refine_groups(
             t_de, self._opts.get("de_groups", []),
             self._de_vars, "Data Element Groups", "count")
-        self._build_keywords(t_pi)
+        self._build_keywords(t_kw)
 
         # ── Bottom bar ─────────────────────────────────────────────────────
         self._summary_lbl = ctk.CTkLabel(
@@ -320,11 +314,9 @@ class FilterConfigDialog(ctk.CTkToplevel):
         parent.grid_columnconfigure(1, weight=1)
 
         rows = [
-            ("Program Indicator name:", self._prog_name_var,
-             "Lọc tên program indicator khi fetch"),
-            ("Indicator name:",         self._ind_name_var,
-             "Lọc tên aggregate indicator khi fetch"),
-            ("Data Element name:",      self._de_name_var,
+            ("Program name:",      self._prog_name_var,
+             "Lọc tên program khi fetch (stage DEs + TEAs)"),
+            ("Data Element name:", self._de_name_var,
              "Lọc tên data element khi fetch"),
         ]
         for i, (lbl, var, hint) in enumerate(rows):
@@ -347,7 +339,6 @@ class FilterConfigDialog(ctk.CTkToplevel):
     def _update_summary(self):
         prg = sum(1 for v in self._prg_vars.values() if v.get())
         ds  = sum(1 for v in self._ds_vars.values()  if v.get())
-        ind = sum(1 for v in self._ind_vars.values() if v.get())
         de  = sum(1 for v in self._de_vars.values()  if v.get())
 
         scope_parts = []
@@ -355,7 +346,6 @@ class FilterConfigDialog(ctk.CTkToplevel):
         if ds:  scope_parts.append(f"{ds} dataset{'s' if ds>1 else ''}")
 
         refine_parts = []
-        if ind: refine_parts.append(f"{ind} ind.group{'s' if ind>1 else ''}")
         if de:  refine_parts.append(f"{de} DE group{'s' if de>1 else ''}")
 
         if not scope_parts and not refine_parts:
@@ -381,16 +371,13 @@ class FilterConfigDialog(ctk.CTkToplevel):
             if uid in self._prg_vars: self._prg_vars[uid].set(True)
         for uid in self._cfg.get("dataset_ids", []):
             if uid in self._ds_vars:  self._ds_vars[uid].set(True)
-        for uid in self._cfg.get("indicator_group_ids", []):
-            if uid in self._ind_vars: self._ind_vars[uid].set(True)
         for uid in self._cfg.get("de_group_ids", []):
             if uid in self._de_vars:  self._de_vars[uid].set(True)
         self._update_summary()
 
     def _clear_all(self):
-        for vd in (self._prg_vars, self._ds_vars, self._ind_vars, self._de_vars):
+        for vd in (self._prg_vars, self._ds_vars, self._de_vars):
             for v in vd.values(): v.set(False)
-        self._ind_name_var.set("")
         self._de_name_var.set("")
         self._prog_name_var.set("")
 
@@ -398,14 +385,12 @@ class FilterConfigDialog(ctk.CTkToplevel):
 
     def _on_apply(self):
         self.result = {
-            "program_ids":            [uid for uid, v in self._prg_vars.items() if v.get()],
-            "program_indicator_name":  self._prog_name_var.get().strip(),
-            "dataset_ids":            [uid for uid, v in self._ds_vars.items()  if v.get()],
-            "indicator_group_ids":    [uid for uid, v in self._ind_vars.items() if v.get()],
-            "indicator_name":          self._ind_name_var.get().strip(),
-            "de_group_ids":           [uid for uid, v in self._de_vars.items()  if v.get()],
-            "de_name":                 self._de_name_var.get().strip(),
-            "domain_type":            "AGGREGATE",
+            "program_ids":  [uid for uid, v in self._prg_vars.items() if v.get()],
+            "program_name":  self._prog_name_var.get().strip(),
+            "dataset_ids":  [uid for uid, v in self._ds_vars.items()  if v.get()],
+            "de_group_ids": [uid for uid, v in self._de_vars.items()  if v.get()],
+            "de_name":       self._de_name_var.get().strip(),
+            "domain_type":  "AGGREGATE",
         }
         self.destroy()
 
