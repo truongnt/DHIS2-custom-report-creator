@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QLineEdit, QComboBox, QProgressBar,
     QMessageBox, QSizePolicy, QStatusBar, QSpacerItem,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 
 from ui.chart_editor_panel import ChartEditorPanel
@@ -118,10 +118,20 @@ def _inactive_sidebar_button_style() -> str:
 
 
 class AppWindow(QMainWindow):
+    # Signals for thread-safe callbacks from worker threads
+    _sig_connect_done = Signal(str, int, object, bool)   # display, count, cached_at, from_cache
+    _sig_connect_fail = Signal(str)                       # error message
+    _sig_status       = Signal(str)                       # status message (non-error)
+    _sig_call_main    = Signal(object)                    # generic: emit(callable) → calls it on main thread
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DHIS2 Auto Report")
         self.setMinimumSize(1024, 640)
+        self._sig_connect_done.connect(self._on_connect_done)
+        self._sig_connect_fail.connect(self._on_connect_fail)
+        self._sig_status.connect(lambda msg: self._set_status(msg))
+        self._sig_call_main.connect(lambda fn: fn())
 
         self._client           = None   # DHIS2Client once connected
         self._metadata         = None   # loaded metadata dict
@@ -415,7 +425,7 @@ class AppWindow(QMainWindow):
         self.connect_btn.setMinimumWidth(120)
         self.connect_btn.setStyleSheet(
             f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
-            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }"
             "QPushButton:hover { background: #155a8a; }"
             "QPushButton:disabled { background: #27ae60; color: white; }"
         )
@@ -668,7 +678,7 @@ class AppWindow(QMainWindow):
                 self.connect_btn.setText("Connect")
                 self.connect_btn.setStyleSheet(
                     f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
-                    "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+                    "  border-radius: 4px; font-size: 12px; padding: 0 12px; }"
                     "QPushButton:hover { background: #155a8a; }"
                     "QPushButton:disabled { background: #27ae60; color: white; }"
                 )
@@ -762,7 +772,7 @@ class AppWindow(QMainWindow):
             display = me.get("name") or me.get("username") or user
 
             # Always load filter options (lightweight — just group names)
-            QTimer.singleShot(0, lambda: self._set_status(f"Connected as {display}. Loading filter options…"))
+            self._sig_status.emit(f"Connected as {display}. Loading filter options…")
             filter_options = fetch_all_filter_options(client)
             self._client         = client
             self._filter_options = filter_options
@@ -776,11 +786,11 @@ class AppWindow(QMainWindow):
                 self._invalidate_ctx_caches()
                 count = (len(cached_meta.get("indicators", [])) +
                          len(cached_meta.get("program_indicators", [])))
-                QTimer.singleShot(0, lambda: self._on_connect_done(display, count, cached_at, True))
+                self._sig_connect_done.emit(display, count, cached_at, True)
                 return
 
             # No cache — fetch with current filter config
-            QTimer.singleShot(0, lambda: self._set_status("Fetching metadata…"))
+            self._sig_status.emit("Fetching metadata…")
             metadata = fetch_all(client, self._filter_cfg)
             cache_save(url, metadata)
             self._metadata   = metadata
@@ -789,11 +799,10 @@ class AppWindow(QMainWindow):
 
             count = (len(metadata.get("indicators", [])) +
                      len(metadata.get("program_indicators", [])))
-            QTimer.singleShot(0, lambda: self._on_connect_done(display, count, None, False))
+            self._sig_connect_done.emit(display, count, None, False)
 
         except Exception as exc:
-            exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_connect_fail(exc_msg))
+            self._sig_connect_fail.emit(str(exc))
 
     def _on_connect_done(self, display: str, count: int,
                           cached_at: str | None, from_cache: bool = False):
@@ -827,10 +836,9 @@ class AppWindow(QMainWindow):
             self.cache_lbl.setStyleSheet("color: #27ae60; font-size: 10px; padding: 0 16px; background: transparent;")
             self._set_status(f"Ready — {n_de} data elements, {n_prog} programs loaded.")
         self._update_filter_summary()
-        self._unlock_ui()   # enables Chart Editor + Dashboard nav buttons
+        self._unlock_ui()
         if self._metadata:
             self._viz_panel.load_metadata(self._metadata)
-        # Auto-switch to Chart Editor after successful login
         self._show_panel("chart_editor")
 
     def _on_connect_fail(self, msg: str):
@@ -839,7 +847,7 @@ class AppWindow(QMainWindow):
         self.connect_btn.setText("Connect")
         self.connect_btn.setStyleSheet(
             f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
-            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }"
             "QPushButton:hover { background: #155a8a; }"
             "QPushButton:disabled { background: #27ae60; color: white; }"
         )
@@ -859,7 +867,7 @@ class AppWindow(QMainWindow):
         self.connect_btn.setText("Connect")
         self.connect_btn.setStyleSheet(
             f"QPushButton {{ background: {DHIS2_BLUE}; color: white; border: none;"
-            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }}"
+            "  border-radius: 4px; font-size: 12px; padding: 0 12px; }"
             "QPushButton:hover { background: #155a8a; }"
             "QPushButton:disabled { background: #27ae60; color: white; }"
         )
@@ -905,11 +913,11 @@ class AppWindow(QMainWindow):
 
             count = (len(metadata.get("indicators", [])) +
                      len(metadata.get("program_indicators", [])))
-            QTimer.singleShot(0, lambda: self._on_metadata_loaded(count))
+            self._sig_call_main.emit(lambda c=count: self._on_metadata_loaded(c))
         except Exception as exc:
             import traceback; traceback.print_exc()
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_metadata_load_fail(exc_msg))
+            self._sig_call_main.emit(lambda m=exc_msg: self._on_metadata_load_fail(m))
 
     def _on_metadata_loaded(self, count: int):
         self._stop_progress()
@@ -1104,23 +1112,23 @@ class AppWindow(QMainWindow):
                 if cid not in changed_ids:
                     continue
                 chart_idx, bs = card_info.get(cid, (1, 6))
-                QTimer.singleShot(0, lambda i=chart_idx: self._set_status(f"Regenerating card {i}…"))
+                self._sig_call_main.emit(lambda i=chart_idx: self._set_status(f"Regenerating card {i}…"))
                 fragment = regenerate_single_card(card, chart_idx, context, bs,
                                                   api_key=api_key, model=model)
                 try:
                     html = splice_card_in_html(html, cid, fragment)
                 except ValueError:
                     # Markers not found — fall back to full regen silently
-                    QTimer.singleShot(0, lambda: self._set_status(
+                    self._sig_call_main.emit(lambda: self._set_status(
                         "Edit markers missing — regenerating full dashboard…"))
-                    QTimer.singleShot(0, self._on_generate)
+                    self._sig_call_main.emit(self._on_generate)
                     return
 
-            QTimer.singleShot(0, lambda h=html: self._on_regen_cards_done(h, new_layout))
+            self._sig_call_main.emit(lambda h=html: self._on_regen_cards_done(h, new_layout))
 
         except Exception as exc:
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_generate_fail(exc_msg))
+            self._sig_call_main.emit(lambda: self._on_generate_fail(exc_msg))
 
     def _on_regen_cards_done(self, html: str, new_layout: list[dict]):
         self._stop_progress()
@@ -1206,7 +1214,7 @@ class AppWindow(QMainWindow):
                 # Lazy-load option sets only for DEs in scope
                 if self._client:
                     from dhis2.metadata import enrich_with_option_sets
-                    QTimer.singleShot(0, lambda: self._set_status("Loading option sets…"))
+                    self._sig_call_main.emit(lambda: self._set_status("Loading option sets…"))
                     enrich_with_option_sets(self._client, scoped_meta)
                 base_ctx = build_context(
                     scoped_meta, url, pinned=merged_pinned, usage_counts=counts)
@@ -1215,7 +1223,7 @@ class AppWindow(QMainWindow):
 
             # LLM filter — further compress to only what the conversation needs
             from llm.chat_generator import filter_metadata_context
-            QTimer.singleShot(0, lambda: self._set_status("Filtering metadata to report scope…"))
+            self._sig_call_main.emit(lambda: self._set_status("Filtering metadata to report scope…"))
             self._scoped_context = filter_metadata_context(messages, base_ctx, api_key)
 
             context = self._scoped_context
@@ -1227,7 +1235,7 @@ class AppWindow(QMainWindow):
             if layout and len(layout) > 1:
                 from llm.dashboard_generator import generate_dashboard_html
                 n = len(layout)
-                QTimer.singleShot(0, lambda: self._set_status(f"Calling Claude to build {n}-chart dashboard…"))
+                self._sig_call_main.emit(lambda: self._set_status(f"Calling Claude to build {n}-chart dashboard…"))
                 html = generate_dashboard_html(prompt, layout, context, api_key=api_key, model=model)
 
             elif layout and len(layout) == 1:
@@ -1237,26 +1245,26 @@ class AppWindow(QMainWindow):
                 tmpl = get_by_id(card.get("template_id", ""))
                 if tmpl:
                     tmpl_name = tmpl["name"]
-                    QTimer.singleShot(0, lambda: self._set_status(f"Filling template '{tmpl_name}' with Claude…"))
+                    self._sig_call_main.emit(lambda: self._set_status(f"Filling template '{tmpl_name}' with Claude…"))
                     html = generate_report_html(
                         prompt, context, api_key=api_key,
                         template_html=tmpl["html"], template_name=tmpl["name"],
                         model=model,
                     )
                 else:
-                    QTimer.singleShot(0, lambda: self._set_status("Calling Claude to generate HTML…"))
+                    self._sig_call_main.emit(lambda: self._set_status("Calling Claude to generate HTML…"))
                     html = generate_report_html(prompt, context, api_key=api_key, model=model)
 
             else:
                 from llm.chat_generator import generate_from_chat
-                QTimer.singleShot(0, lambda: self._set_status("Calling Claude to generate HTML from chat…"))
+                self._sig_call_main.emit(lambda: self._set_status("Calling Claude to generate HTML from chat…"))
                 html = generate_from_chat(messages, context, api_key, model=model)
 
-            QTimer.singleShot(0, lambda h=html: self._on_generate_done(h))
+            self._sig_call_main.emit(lambda h=html: self._on_generate_done(h))
 
         except Exception as exc:
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_generate_fail(exc_msg))
+            self._sig_call_main.emit(lambda: self._on_generate_fail(exc_msg))
 
     def _on_generate_done(self, html: str):
         self._stop_progress()
@@ -1348,10 +1356,10 @@ class AppWindow(QMainWindow):
             # Record usage for pinned indicators
             record_usage(base, self._pinned)
 
-            QTimer.singleShot(0, lambda: self._on_deploy_done(name, uid, url))
+            self._sig_call_main.emit(lambda: self._on_deploy_done(name, uid, url))
         except Exception as exc:
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_deploy_fail(exc_msg))
+            self._sig_call_main.emit(lambda: self._on_deploy_fail(exc_msg))
 
     def _on_deploy_done(self, name: str, uid: str, url: str):
         self._stop_progress()
@@ -1467,7 +1475,7 @@ class AppWindow(QMainWindow):
                     (p.get("id") for p in base_meta.get("programs", [])
                      if p.get("displayName") == prog_name), None)
                 if prog_uid:
-                    QTimer.singleShot(0, lambda: self._set_status(f"Loading data elements for {prog_name}…"))
+                    self._sig_call_main.emit(lambda: self._set_status(f"Loading data elements for {prog_name}…"))
                     from dhis2.metadata import fetch_program_stage_data_elements
                     fresh_des = fetch_program_stage_data_elements(self._client, [prog_uid])
                     if fresh_des:
@@ -1482,7 +1490,7 @@ class AppWindow(QMainWindow):
                         scoped_meta = filter_metadata_by_scope(
                             base_meta, prog_name, stage_names)
                         # Update form dropdowns on main thread
-                        QTimer.singleShot(0, lambda: self.quick_form.set_metadata(base_meta))
+                        self._sig_call_main.emit(lambda: self.quick_form.set_metadata(base_meta))
 
             # ── Backfill missing metric_uid from name match ──────────────────
             psde_by_name = {
@@ -1521,17 +1529,17 @@ class AppWindow(QMainWindow):
                         c["program_name"] = psde_match.get("program", {}).get("displayName", "")
                         c["stage_name"]   = psde_match.get("stage",   {}).get("displayName", "")
 
-            QTimer.singleShot(0, lambda: self._set_status("Calling Claude to build dashboard…"))
+            self._sig_call_main.emit(lambda: self._set_status("Calling Claude to build dashboard…"))
             html = generate_from_chart_configs(
                 configs, context,
                 context_hint=scope_text,
                 analytics_params=analytics_params,
                 api_key=api_key, model=model)
-            QTimer.singleShot(0, lambda h=html: self._on_form_generate_done(h))
+            self._sig_call_main.emit(lambda h=html: self._on_form_generate_done(h))
 
         except Exception as exc:
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_form_generate_fail(exc_msg))
+            self._sig_call_main.emit(lambda: self._on_form_generate_fail(exc_msg))
 
     def _on_form_generate_fail(self, msg: str):
         self._stop_progress()
@@ -1612,10 +1620,10 @@ class AppWindow(QMainWindow):
 
             messages = self.chat_panel.get_messages()
             response = chat_plan(messages, self._summary_ctx, api_key, model=model)
-            QTimer.singleShot(0, lambda r=response: self._on_chat_plan_done(r))
+            self._sig_call_main.emit(lambda r=response: self._on_chat_plan_done(r))
         except Exception as exc:
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_chat_fail(exc_msg))
+            self._sig_call_main.emit(lambda: self._on_chat_fail(exc_msg))
 
     def _on_chat_plan_done(self, response: str):
         self.chat_panel.set_generating(False)
@@ -1640,10 +1648,10 @@ class AppWindow(QMainWindow):
                 context = build_context(self._metadata or {}, url, pinned=merged, usage_counts=counts)
 
             html = refine_from_chat(request, current_html, context, api_key, model=model)
-            QTimer.singleShot(0, lambda h=html: self._on_refine_done(h))
+            self._sig_call_main.emit(lambda h=html: self._on_refine_done(h))
         except Exception as exc:
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_chat_fail(exc_msg))
+            self._sig_call_main.emit(lambda: self._on_chat_fail(exc_msg))
 
     def _on_refine_done(self, html: str):
         self._stop_progress()
@@ -1826,12 +1834,12 @@ class AppWindow(QMainWindow):
             config["mode"] = "ai"
             config["html_path"] = str(out_path)
 
-            QTimer.singleShot(0, lambda: self._on_ai_generate_done(config, out_path))
+            self._sig_call_main.emit(lambda: self._on_ai_generate_done(config, out_path))
 
         except Exception as exc:
             import traceback; traceback.print_exc()
             exc_msg = str(exc)
-            QTimer.singleShot(0, lambda: self._on_ai_generate_fail(exc_msg))
+            self._sig_call_main.emit(lambda: self._on_ai_generate_fail(exc_msg))
 
     def _on_ai_generate_done(self, config: dict, html_path):
         self._stop_progress()

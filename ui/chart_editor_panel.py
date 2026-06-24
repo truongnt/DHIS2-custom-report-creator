@@ -1223,6 +1223,8 @@ class ChartEditorPanel(QWidget):
         self._stage_menu.blockSignals(False)
         self._stage_menu.setCurrentIndex(0)
         self._refresh_de_list()
+        self._refresh_metrics_display()
+        self._refresh_dimensions_display()
 
     def _on_stage_selected(self, _=None):
         self._refresh_de_list()

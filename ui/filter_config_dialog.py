@@ -164,7 +164,7 @@ class FilterConfigDialog(QDialog):
         cancel_btn.setFixedHeight(34)
         cancel_btn.setStyleSheet(
             f"QPushButton {{ background:transparent; border:1px solid {BORDER}; "
-            "border-radius:4px; color:#4a6278; font-size:11px; padding:0 16px; }}"
+            "border-radius:4px; color:#4a6278; font-size:11px; padding:0 16px; }"
             "QPushButton:hover { background:#e8f0f8; }"
         )
         cancel_btn.clicked.connect(self._on_cancel)
@@ -174,7 +174,7 @@ class FilterConfigDialog(QDialog):
         apply_btn.setFixedHeight(34)
         apply_btn.setStyleSheet(
             f"QPushButton {{ background:{DHIS2_BLUE}; border:none; border-radius:4px; "
-            "color:white; font-size:11px; font-weight:bold; padding:0 20px; }}"
+            "color:white; font-size:11px; font-weight:bold; padding:0 20px; }"
             "QPushButton:hover { background:#155a8a; }"
         )
         apply_btn.clicked.connect(self._on_apply)
