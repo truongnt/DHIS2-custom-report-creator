@@ -56,6 +56,10 @@ class DimensionControl:
     """Describes a dimension (split-by) slot in a chart plugin.
     Any DE type can be a dimension; option-set DEs produce legend labels
     from their option values via DHIS2 metaData.items.
+
+    max_count > 1 + show_alias=True make the picker behave like the metrics picker
+    (multi-select DE/PA, each with an optional display alias) — used by the data table
+    to disaggregate rows by one or more dimensions.
     """
     id: str
     label: str
@@ -63,6 +67,8 @@ class DimensionControl:
     allowed_types: tuple[str, ...] = ("tracker_option", "tracker_numeric", "aggregate", "indicator")
     required: bool = False
     hint: str = ""
+    max_count: int = 1
+    show_alias: bool = False
 
 
 @dataclass
@@ -72,6 +78,33 @@ class SelectControl:
     label: str
     choices: tuple[str, ...]
     default: str = ""
+
+
+@dataclass
+class CheckboxGroupControl:
+    """Multi-select control rendered as toggle buttons — any subset can be active.
+
+    Value stored in plugin_options as comma-separated selected labels, e.g. "Level 2,Level 4".
+    """
+    id: str
+    label: str
+    choices: tuple[str, ...]
+    default: tuple[str, ...] = ()  # initially checked items
+
+
+@dataclass
+class TextAreaControl:
+    """A large multi-line text input (rendered as a tall monospace editor in the UI).
+
+    Used for free-form content like the Custom HTML widget's HTML/JS template.
+    Value stored in plugin_options as a plain string.
+    """
+    id: str
+    label: str
+    default: str = ""
+    placeholder: str = ""
+    height: int = 240
+    monospace: bool = True
 
 
 @dataclass
@@ -147,7 +180,8 @@ class ChartPlugin:
             val    = f.get("value", "")
             if not de_uid or not val:
                 continue
-            prefix = f"{stage}." if stage else ""
+            # Program attributes (TEA) are dimensioned by their bare uid, not stage.uid.
+            prefix = "" if f.get("is_tea") else (f"{stage}." if stage else "")
             out.append(f"filter={prefix}{de_uid}:{op}:{val}")
         return "&".join(out)
 
@@ -161,7 +195,7 @@ class ChartPlugin:
             de_uid = g.get("uid", "")
             if not de_uid:
                 continue
-            prefix = f"{stage}." if stage else ""
+            prefix = "" if g.get("is_tea") else (f"{stage}." if stage else "")
             out.append(f"dimension={prefix}{de_uid}")
         return "&".join(out)
 

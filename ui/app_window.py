@@ -1,6 +1,8 @@
 import copy
 import threading
 import os
+import re
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 from PySide6.QtWidgets import (
@@ -81,7 +83,7 @@ def _make_sidebar_button(text: str, parent: QWidget) -> QPushButton:
         "  border-radius: 6px;"
         "}"
         "QPushButton:hover { background: #253d52; }"
-        "QPushButton:disabled { color: #445566; }"
+        "QPushButton:disabled { color: #8499ac; }"
     )
     return btn
 
@@ -113,7 +115,7 @@ def _inactive_sidebar_button_style() -> str:
         "  border-radius: 6px;"
         "}"
         "QPushButton:hover { background: #253d52; }"
-        "QPushButton:disabled { color: #445566; }"
+        "QPushButton:disabled { color: #8499ac; }"
     )
 
 
@@ -126,7 +128,7 @@ class AppWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DHIS2 Auto Report")
+        self.setWindowTitle("DHIS2 Dashboard Builder")
         self.setMinimumSize(1024, 640)
         self._sig_connect_done.connect(self._on_connect_done)
         self._sig_connect_fail.connect(self._on_connect_fail)
@@ -172,7 +174,7 @@ class AppWindow(QMainWindow):
 
     def _unlock_ui(self):
         """Enable Chart Editor and Dashboard nav buttons after connect."""
-        for key in ("chart_editor", "dashboard"):
+        for key in ("chart_editor", "dashboard", "metadata_editor"):
             if key in self._nav_btns:
                 self._nav_btns[key].setEnabled(True)
 
@@ -222,7 +224,7 @@ class AppWindow(QMainWindow):
         layout.setSpacing(0)
 
         # App title
-        title_lbl = QLabel("DHIS2\nAuto Report", sidebar)
+        title_lbl = QLabel("DHIS2\nDashboard Builder", sidebar)
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_lbl.setStyleSheet(
             "color: white; font-size: 13px; font-weight: bold;"
@@ -252,6 +254,14 @@ class AppWindow(QMainWindow):
             layout.addSpacing(2)
             self._nav_btns[key] = btn
 
+        # Metadata editor button (enabled after connect)
+        meta_btn = _make_sidebar_button("  \U0001f4da  Metadata Library", sidebar)
+        meta_btn.setEnabled(False)
+        meta_btn.clicked.connect(self._open_metadata_editor)
+        layout.addWidget(meta_btn)
+        layout.addSpacing(2)
+        self._nav_btns["metadata_editor"] = meta_btn
+
         # Disable builder panels until connected
         self._nav_btns["chart_editor"].setEnabled(False)
         self._nav_btns["dashboard"].setEnabled(False)
@@ -261,13 +271,23 @@ class AppWindow(QMainWindow):
 
         # Version label
         ver_lbl = QLabel("v0.1.0 — CHAI Laos", sidebar)
-        ver_lbl.setStyleSheet("color: #4a6278; font-size: 9px; background: transparent; padding: 0 6px;")
+        ver_lbl.setStyleSheet("color: #93a8bc; font-size: 9px; background: transparent; padding: 0 6px;")
         layout.addWidget(ver_lbl)
 
         return sidebar
 
     def _show_panel(self, name: str):
-        PANEL_INDEX = {"config": 0, "chart_editor": 1, "dashboard": 2}
+        PANEL_INDEX = {"config": 0, "chart_editor": 1, "dashboard": 2, "metadata_editor": 3}
+        # Persist description edits when navigating away from the metadata editor.
+        if getattr(self, "_active_panel", None) == "metadata_editor" and name != "metadata_editor":
+            try:
+                self._metadata_editor.flush_pending()
+                self._update_dashboard_context()
+                # Push the curated in-use selection to the Chart Editor's pickers.
+                self._chart_editor.set_in_use(self._metadata_editor.get_selection())
+            except Exception:
+                pass
+
         idx = PANEL_INDEX.get(name, 0)
         self._content.setCurrentIndex(idx)
 
@@ -284,7 +304,7 @@ class AppWindow(QMainWindow):
                 if not btn.isEnabled():
                     btn.setStyleSheet(
                         _inactive_sidebar_button_style()
-                        + "QPushButton { color: #445566; }"
+                        + "QPushButton { color: #8499ac; }"
                     )
 
     # ─── Content panels ───────────────────────────────────────────────────────
@@ -324,7 +344,7 @@ class AppWindow(QMainWindow):
                 "on_add_to_dashboard":    self._on_add_to_dashboard,
                 "on_generate_ai":         self._on_ai_generate,
                 "on_switch_to_dashboard": lambda: self._show_panel("dashboard"),
-                "get_api_key": lambda: self.apikey_entry.text().strip() or self._api_key,
+                "get_api_key": self.current_api_key,
                 "get_model":   self._get_model,
             })
         self._content.addWidget(self._chart_editor)    # index 1
@@ -337,9 +357,15 @@ class AppWindow(QMainWindow):
                 "on_export":           self._on_export,
                 "on_deploy":           self._on_deploy_dashboard,
                 "on_switch_to_editor": lambda: self._show_panel("chart_editor"),
+                "on_open_chart":       self._open_chart_in_editor,
             })
         self._content.addWidget(self._dashboard_builder)   # index 2
         self._dashboard_panel = self._dashboard_builder    # alias
+
+        # Panel 3: Metadata Library (curation + descriptions) — embedded, not a popup
+        from ui.metadata_editor_panel import MetadataEditorPanel
+        self._metadata_editor = MetadataEditorPanel(self._content)
+        self._content.addWidget(self._metadata_editor)     # index 3
 
     # ─── Config panel content ─────────────────────────────────────────────────
 
@@ -410,7 +436,15 @@ class AppWindow(QMainWindow):
         self.pass_entry.setEchoMode(QLineEdit.EchoMode.Password)
         self.pass_entry.setFixedHeight(32)
         self.pass_entry.setStyleSheet(self._entry_style())
-        lf_layout.addWidget(self.pass_entry)
+        pw_row = QWidget()
+        pw_row.setStyleSheet("background: transparent;")
+        pw_hl = QHBoxLayout(pw_row)
+        pw_hl.setContentsMargins(0, 0, 0, 0)
+        pw_hl.setSpacing(4)
+        pw_hl.addWidget(self.pass_entry, 1)
+        self.pass_reveal_btn = self._make_reveal_btn(self.pass_entry)
+        pw_hl.addWidget(self.pass_reveal_btn)
+        lf_layout.addWidget(pw_row)
         lf_layout.addSpacing(4)
 
         # Buttons row
@@ -476,29 +510,11 @@ class AppWindow(QMainWindow):
         layout.addSpacing(2)
 
         self.cache_lbl = QLabel("")
-        self.cache_lbl.setStyleSheet("color: #4a6278; font-size: 10px; padding: 0 16px; background: transparent;")
+        self.cache_lbl.setStyleSheet("color: #93a8bc; font-size: 10px; padding: 0 16px; background: transparent;")
         layout.addWidget(self.cache_lbl)
         layout.addSpacing(4)
 
-        self.filter_btn = QPushButton("⚙ Filters && Load Metadata")
-        self.filter_btn.setFixedHeight(34)
-        self.filter_btn.setEnabled(False)
-        self.filter_btn.setStyleSheet(
-            "QPushButton { background: #2a4a6a; color: white; border: none; border-radius: 4px;"
-            "  font-size: 12px; margin: 0 16px; }"
-            "QPushButton:hover { background: #1a3a5a; }"
-            "QPushButton:disabled { background: #223344; color: #667788; }"
-        )
-        self.filter_btn.clicked.connect(self._on_open_filter_config)
-        layout.addWidget(self.filter_btn)
-        layout.addSpacing(2)
-
-        self.filter_summary_lbl = QLabel("")
-        self.filter_summary_lbl.setWordWrap(True)
-        self.filter_summary_lbl.setStyleSheet(
-            "color: #f39c12; font-size: 10px; padding: 0 16px; background: transparent;"
-        )
-        layout.addWidget(self.filter_summary_lbl)
+        # Metadata scope filter moved to the Metadata Library panel (⚙ Filters && Load).
         layout.addSpacing(8)
 
         # ── Anthropic API Key ─────────────────────────────────────────────────
@@ -519,6 +535,9 @@ class AppWindow(QMainWindow):
         if self._api_key:
             self.apikey_entry.setText(self._api_key)
 
+        self.apikey_reveal_btn = self._make_reveal_btn(self.apikey_entry)
+        ak_hl.addWidget(self.apikey_reveal_btn)
+
         self.save_apikey_btn = QPushButton("\U0001f4be")
         self.save_apikey_btn.setFixedSize(34, 32)
         self.save_apikey_btn.setToolTip("Save API key to Windows Credential Manager")
@@ -536,7 +555,7 @@ class AppWindow(QMainWindow):
         self._MODEL_OPTIONS = {
             "Haiku 4.5  (fast, cheap)":  "claude-haiku-4-5-20251001",
             "Sonnet 4.6  (balanced)":    "claude-sonnet-4-6",
-            "Opus 4.7  (best quality)":  "claude-opus-4-7",
+            "Opus 4.8  (best quality)":  "claude-opus-4-8",
         }
         self.model_combo = QComboBox()
         for label in self._MODEL_OPTIONS:
@@ -548,11 +567,18 @@ class AppWindow(QMainWindow):
             "QComboBox QAbstractItemView { background: white; color: #1e2d3d;"
             "  selection-background-color: #dbeafe; }"
         )
+        # Persist the AI model choice across restarts (config/app_settings.json — a plain
+        # file in the app folder, not the Windows registry).
+        from config import app_settings
+        _saved = app_settings.get("ai_model_label", "")
+        if _saved in self._MODEL_OPTIONS:
+            self.model_combo.setCurrentText(_saved)
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
         layout.addWidget(self.model_combo)
 
         # Footer
         footer = QLabel("v0.1.0 — CHAI Laos")
-        footer.setStyleSheet("color: #4a6278; font-size: 10px; padding: 16px 16px 12px 16px; background: transparent;")
+        footer.setStyleSheet("color: #93a8bc; font-size: 10px; padding: 16px 16px 12px 16px; background: transparent;")
         layout.addWidget(footer)
         layout.addStretch()
 
@@ -582,17 +608,59 @@ class AppWindow(QMainWindow):
         label = self.model_combo.currentText()
         return self._MODEL_OPTIONS.get(label, "claude-haiku-4-5-20251001")
 
+    def _on_model_changed(self, label: str) -> None:
+        """Remember the selected AI model across app restarts (config/app_settings.json)."""
+        from config import app_settings
+        app_settings.set("ai_model_label", label)
+
+    def current_api_key(self) -> str:
+        """REQ-LOGIN-APIKEY-03: field value takes precedence, falling back to the saved key."""
+        return self.apikey_entry.text().strip() or self._api_key
+
+    def _make_reveal_btn(self, entry: QLineEdit) -> QPushButton:
+        """REQ-LOGIN-UX-01: 👁 toggle to show/hide a password-style field."""
+        btn = QPushButton("\U0001f441")          # 👁
+        btn.setFixedSize(34, 32)
+        btn.setCheckable(True)
+        btn.setToolTip("Show / hide")
+        btn.setStyleSheet(
+            "QPushButton { background: #253d52; color: white; border: 1px solid #2a4a6a;"
+            "  border-radius: 4px; font-size: 13px; }"
+            "QPushButton:checked { background: #1a6fa8; }"
+        )
+        btn.toggled.connect(
+            lambda on: entry.setEchoMode(
+                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        return btn
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """REQ-LOGIN-VAL-01: trim, add https:// if no scheme, drop trailing slash."""
+        url = (url or "").strip()
+        if url and not re.match(r"^https?://", url, re.IGNORECASE):
+            url = "https://" + url
+        return url.rstrip("/")
+
+    @staticmethod
+    def _is_valid_url(url: str) -> bool:
+        """REQ-LOGIN-VAL-01: must be http(s):// with a host."""
+        try:
+            p = urlparse(url)
+        except Exception:
+            return False
+        return p.scheme in ("http", "https") and bool(p.netloc)
+
     # ─── Status bar ───────────────────────────────────────────────────────────
 
     def _build_statusbar(self):
         sb = self.statusBar()
         sb.setStyleSheet(
             "QStatusBar { background: #eef2f7; border-top: 1px solid #d0dde8;"
-            "  color: #6b8299; font-size: 11px; }"
+            "  color: #4a6278; font-size: 11px; }"
             "QStatusBar::item { border: none; }"
         )
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: #6b8299; padding: 0 8px;")
+        self.status_label.setStyleSheet("color: #4a6278; padding: 0 8px;")
         sb.addWidget(self.status_label, 1)
 
         self.progress = QProgressBar()
@@ -607,7 +675,7 @@ class AppWindow(QMainWindow):
         sb.addPermanentWidget(self.progress)
 
     def _set_status(self, msg: str, error: bool = False):
-        color = "#e74c3c" if error else "#6b8299"
+        color = "#e74c3c" if error else "#4a6278"
         self.status_label.setStyleSheet(f"color: {color}; padding: 0 8px;")
         self.status_label.setText(msg)
 
@@ -733,11 +801,16 @@ class AppWindow(QMainWindow):
     # ─── Connect (cache-first) ────────────────────────────────────────────────
 
     def _on_connect(self):
-        url  = self.url_entry.text().strip()
+        url  = self._normalize_url(self.url_entry.text())
+        if url != self.url_entry.text():
+            self.url_entry.setText(url)        # reflect normalisation in the field
         user = self.user_entry.text().strip()
         pwd  = self.pass_entry.text()
         if not (url and user and pwd):
             self._set_status("Fill in URL, username, and password.", error=True)
+            return
+        if not self._is_valid_url(url):
+            self._set_status("Invalid server URL — must be http(s)://host", error=True)
             return
 
         self.connect_btn.setEnabled(False)
@@ -818,7 +891,9 @@ class AppWindow(QMainWindow):
         self._login_frame.hide()
         self.change_conn_btn.show()
         self.refresh_btn.setEnabled(True)
-        self.filter_btn.setEnabled(True)
+        # Enable the Metadata Library's scope-filter action now that we're connected.
+        self._metadata_editor.set_filter_callback(self._on_open_filter_config)
+        self._update_filter_summary()
         n_de   = len((self._metadata or {}).get("data_elements", []))
         n_prog = len((self._metadata or {}).get("programs", []))
         status_text = f"● {display}  ({n_de} DEs"
@@ -837,9 +912,120 @@ class AppWindow(QMainWindow):
             self._set_status(f"Ready — {n_de} data elements, {n_prog} programs loaded.")
         self._update_filter_summary()
         self._unlock_ui()
+        self._chart_editor._dhis2_client = self._client
+        # Configure preview server proxy so /api/* calls reach DHIS2
+        try:
+            from ui.preview_server import configure_proxy
+            auth = self._client._auth
+            configure_proxy(self._client.base_url, auth.username, auth.password)
+        except Exception:
+            pass
         if self._metadata:
             self._viz_panel.load_metadata(self._metadata)
+            self._download_sample_background(self._metadata)
+            self._update_dashboard_context()
+            # Apply the saved in-use selection so pickers offer only curated metadata.
+            try:
+                from config.selection import load_selection
+                base_url = self._client.base_url if self._client else ""
+                self._chart_editor.set_in_use(load_selection(base_url) if base_url else set())
+            except Exception:
+                pass
         self._show_panel("chart_editor")
+
+    def _update_dashboard_context(self) -> None:
+        """Pass current metadata + descriptions to the dashboard builder for AI generate."""
+        if not self._metadata:
+            return
+        base_url = ""
+        try:
+            base_url = self._client.base_url if self._client else ""
+        except Exception:
+            pass
+        try:
+            from config.descriptions import load_descriptions
+            descriptions = load_descriptions(base_url) if base_url else {}
+        except Exception:
+            descriptions = {}
+        self._dashboard_builder.set_context(
+            metadata=self._metadata,
+            descriptions=descriptions,
+            base_url=base_url,
+        )
+
+    def _open_metadata_editor(self) -> None:
+        """Show the Metadata Library panel (curation + descriptions) — embedded, not a popup."""
+        if not self._metadata:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Metadata Library",
+                                    "Connect to a DHIS2 instance first.")
+            return
+        base_url = ""
+        try:
+            base_url = self._client.base_url if self._client else ""
+        except Exception:
+            pass
+        try:
+            from config.descriptions import load_descriptions
+            descriptions = load_descriptions(base_url) if base_url else {}
+        except Exception:
+            descriptions = {}
+        self._metadata_editor.set_context(base_url, self._metadata, descriptions)
+        self._update_filter_summary()
+        self._show_panel("metadata_editor")
+        # Aggregate indicators are skipped on tracker-only connects — fetch them lazily so
+        # they can be curated here (they'd otherwise never appear in the Library).
+        if self._client and not self._metadata.get("indicators"):
+            self._set_status("Loading indicators…")
+            threading.Thread(target=self._load_indicators_for_library, daemon=True).start()
+
+    def _load_indicators_for_library(self) -> None:
+        try:
+            from dhis2.metadata import fetch_indicators
+            cfg = (self._metadata or {}).get("_filter_config") or {}
+            rows = fetch_indicators(self._client, cfg)
+        except Exception as exc:
+            self._sig_call_main.emit(lambda e=exc: self._set_status(
+                f"Could not load indicators: {e}", error=True))
+            return
+
+        def _apply():
+            if not rows:
+                self._set_status("No indicators found for this instance.")
+                return
+            self._metadata["indicators"] = rows
+            self._metadata_editor.add_metadata({"indicators": rows})
+            # Hand them to the Chart Editor too so curated indicators render without a re-fetch.
+            self._chart_editor._agg_indicators = sorted(
+                [{"uid": i["id"], "name": i.get("displayName", i["id"]),
+                  "type": "indicator", "prog_uid": "", "stage_uid": "", "kind": "I"}
+                 for i in rows], key=lambda x: x["name"].lower())
+            self._chart_editor._indicators_loaded = True
+            self._set_status(f"Loaded {len(rows)} indicators — now available in the Library.")
+        self._sig_call_main.emit(_apply)
+
+    def _download_sample_background(self, metadata: dict):
+        """Silently download RAW sample events + metadata export after connect.
+
+        Uses the DHIS2 export APIs (tracker events + metadata dependency export) and
+        saves native JSON under data/<instance_slug>/ — see dhis2/sample_fetcher.py.
+        """
+        try:
+            from dhis2 import data_store
+            from dhis2.sample_fetcher import download_sample_data_async
+        except Exception:
+            return
+        if not self._client:
+            return
+
+        base_url     = self._client.base_url
+        program_ids  = [p["id"] for p in metadata.get("programs", []) if p.get("id")]
+        dataset_ids  = [d["id"] for d in metadata.get("datasets", []) if d.get("id")]
+
+        # Set the active instance now so the preview generator reads the right folder
+        # even before the background download finishes (it falls back to any prior data).
+        data_store.set_active_instance(base_url)
+        download_sample_data_async(self._client, base_url, program_ids, dataset_ids)
 
     def _on_connect_fail(self, msg: str):
         self._stop_progress()
@@ -893,8 +1079,7 @@ class AppWindow(QMainWindow):
         self._update_filter_summary()
         self._set_status("Filter configured. Loading metadata…")
         self._start_progress()
-        self.filter_btn.setEnabled(False)
-        self.filter_btn.setText("Loading…")
+        self._metadata_editor.set_filter_summary("⏳ Loading metadata…")
 
         threading.Thread(target=self._load_metadata_worker, daemon=True).start()
 
@@ -921,8 +1106,6 @@ class AppWindow(QMainWindow):
 
     def _on_metadata_loaded(self, count: int):
         self._stop_progress()
-        self.filter_btn.setEnabled(True)
-        self.filter_btn.setText("⚙ Configure Filters && Load Metadata")
         self.cache_lbl.setText("Metadata freshly loaded.")
         self.cache_lbl.setStyleSheet("color: #27ae60; font-size: 10px; padding: 0 16px; background: transparent;")
         self._update_filter_summary()
@@ -930,18 +1113,29 @@ class AppWindow(QMainWindow):
         self._set_status(f"Metadata loaded — {n_de} data elements.")
         if self._metadata:
             self._viz_panel.load_metadata(self._metadata)
+            # Refresh the Metadata Library in place with the newly-scoped metadata.
+            base_url = self._client.base_url if self._client else ""
+            try:
+                from config.descriptions import load_descriptions
+                descriptions = load_descriptions(base_url) if base_url else {}
+            except Exception:
+                descriptions = {}
+            self._metadata_editor.set_context(base_url, self._metadata, descriptions)
+            self._update_filter_summary()
+            try:
+                from config.selection import load_selection
+                self._chart_editor.set_in_use(load_selection(base_url) if base_url else set())
+            except Exception:
+                pass
 
     def _on_metadata_load_fail(self, msg: str):
         self._stop_progress()
-        self.filter_btn.setEnabled(True)
-        self.filter_btn.setText("⚙ Configure Filters && Load Metadata")
+        self._update_filter_summary()
         self._set_status(f"Metadata load failed: {msg}", error=True)
 
     def _update_filter_summary(self):
-        cfg = self._filter_cfg
-        if not cfg:
-            self.filter_summary_lbl.setText("")
-            return
+        """Push a short scope-summary to the Metadata Library's filter label."""
+        cfg = self._filter_cfg or {}
         parts = []
         if cfg.get("indicator_group_ids"):
             parts.append(f"{len(cfg['indicator_group_ids'])} ind.groups")
@@ -949,19 +1143,16 @@ class AppWindow(QMainWindow):
             parts.append(f"{len(cfg['de_group_ids'])} DE groups")
         if cfg.get("program_ids"):
             parts.append(f"{len(cfg['program_ids'])} programs")
+        if cfg.get("dataset_ids"):
+            parts.append(f"{len(cfg['dataset_ids'])} datasets")
         kws = [v for k, v in cfg.items() if k.endswith("_name") and v]
         if kws:
             parts.append(f"keywords: {', '.join(kws)}")
-        if parts:
-            self.filter_summary_lbl.setText("Filters: " + " | ".join(parts))
-            self.filter_summary_lbl.setStyleSheet(
-                "color: #f39c12; font-size: 10px; padding: 0 16px; background: transparent;"
-            )
-        else:
-            self.filter_summary_lbl.setText("No filters — all metadata loaded")
-            self.filter_summary_lbl.setStyleSheet(
-                "color: #8aa3b8; font-size: 10px; padding: 0 16px; background: transparent;"
-            )
+        text = ("Scope: " + " | ".join(parts)) if parts else "Scope: all metadata"
+        try:
+            self._metadata_editor.set_filter_summary(text)
+        except Exception:
+            pass
 
     # ─── Metadata Selector ───────────────────────────────────────────────────
 
@@ -1141,6 +1332,28 @@ class AppWindow(QMainWindow):
         self._set_status("Card(s) regenerated. Preview or Deploy to DHIS2.")
 
     # ─── Chart Library (single chart fallback) ──────────────────────────────
+
+    def _open_chart_in_editor(self, cfg: dict):
+        """Open a dashboard card's chart in the Chart Editor for quick editing. Resolve the
+        library id (by name) if the card lacks one, so Save updates the saved chart (Save As
+        makes a copy) instead of always behaving like Save As."""
+        cfg = dict(cfg)
+        if not cfg.get("id"):
+            try:
+                from config.chart_library import load_charts
+                nm = cfg.get("name") or cfg.get("title")
+                match = next((c for c in load_charts()
+                              if (c.get("name") or c.get("title")) == nm), None)
+                if match:
+                    cfg["id"] = match.get("id")
+                    cfg.setdefault("name", match.get("name") or match.get("title"))
+            except Exception:
+                pass
+        self._show_panel("chart_editor")
+        try:
+            self._chart_editor._load_chart_config(cfg)
+        except Exception as e:
+            print("open chart in editor failed:", e)
 
     def _on_open_chart_library(self):
         from ui.chart_library import ChartLibrary
@@ -1343,13 +1556,14 @@ class AppWindow(QMainWindow):
 
     def _deploy_worker(self, name: str, html: str):
         try:
-            from dhis2.report_api import create_report, report_url
+            from dhis2.report_api import deploy_report, report_url
             from dhis2.usage_tracker import record_usage
             from llm.html_utils import fix_cdn_links
 
             html = fix_cdn_links(html)  # ensure CDN links are correct before deploying
-            result = create_report(self._client, name, html)
-            uid    = (result.get("response", {}).get("uid") or result.get("uid") or "")
+            # Upsert by name → re-deploying overwrites the same report (no duplicates).
+            result = deploy_report(self._client, name, html)
+            uid    = result.get("uid", "")
             base   = self.url_entry.text().strip()
             url    = report_url(base, uid) if uid else base
 
@@ -1852,7 +2066,8 @@ class AppWindow(QMainWindow):
         self._stop_progress()
         self._set_status(f"AI generate failed: {msg}", error=True)
 
-    def _on_export(self, cards: list[dict]):
+    def _on_export(self, cards: list[dict], filters: dict | None = None,
+                   custom_css: str = ""):
         """Export all dashboard cards to a full HTML file and open in browser."""
         if not cards:
             self._set_status("No cards to export.", error=True)
@@ -1861,11 +2076,13 @@ class AppWindow(QMainWindow):
         from pathlib import Path
         from charts.fixed_templates import assemble_dashboard
 
-        fixed    = [c for c in cards if c.get("mode") != "ai"]
+        # Only pre-rendered AI cards (mode=ai WITH an html_path) open separately;
+        # AI-chat cards are normal fixed-template configs and get assembled like the rest.
+        fixed    = [c for c in cards if not (c.get("mode") == "ai" and c.get("html_path"))]
         ai_paths = [c.get("html_path") for c in cards if c.get("mode") == "ai" and c.get("html_path")]
 
         title = "Dashboard"
-        html = assemble_dashboard(fixed, title=title)
+        html = assemble_dashboard(fixed, title=title, filters=filters, custom_css=custom_css)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         debug_dir = Path(__file__).parent.parent / "debug"
@@ -1881,7 +2098,8 @@ class AppWindow(QMainWindow):
             for p in ai_paths:
                 webbrowser.open(Path(p).as_uri())
 
-    def _on_deploy_dashboard(self, report_name: str, cards: list[dict]):
+    def _on_deploy_dashboard(self, report_name: str, cards: list[dict], filters: dict | None = None,
+                             custom_css: str = ""):
         """Assemble dashboard HTML and deploy to DHIS2 as an HTML report object."""
         if not self._client:
             self._set_status("Connect to DHIS2 first.", error=True)
@@ -1895,8 +2113,8 @@ class AppWindow(QMainWindow):
         from charts.fixed_templates import assemble_dashboard
         from llm.html_utils import fix_cdn_links
 
-        fixed = [c for c in cards if c.get("mode") != "ai"]
-        html = assemble_dashboard(fixed, title=report_name)
+        fixed = [c for c in cards if not (c.get("mode") == "ai" and c.get("html_path"))]
+        html = assemble_dashboard(fixed, title=report_name, filters=filters, custom_css=custom_css)
         html = fix_cdn_links(html)
 
         self._set_status("Deploying to DHIS2…")

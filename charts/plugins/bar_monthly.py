@@ -147,10 +147,10 @@ class BarMonthlyPlugin(ChartPlugin):
           const peIdx  = d.headers.findIndex(h => h.name === 'pe');
           const valIdx = d.headers.findIndex(h => h.name === 'value');
           const periods = [...new Set(d.rows.map(r => r[peIdx]))].sort();
-          const vals = periods.map(p => {{
-            const row = d.rows.find(r => r[peIdx] === p);
-            return row ? parseFloat(row[valIdx]) || 0 : 0;
-          }});
+          // Sum all rows per period (OU-level filters return one row per org unit) → total.
+          const vals = periods.map(p =>
+            d.rows.filter(r => r[peIdx] === p)
+                  .reduce((s, r) => s + (parseFloat(r[valIdx]) || 0), 0));
           let labels = periods.map(formatPeriodLabel);
           let combined = labels.map((l, i) => ({{l, v: vals[i]}}));
           {sort_limit}

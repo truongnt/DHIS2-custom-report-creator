@@ -1,0 +1,5 @@
+# Test / dev dependencies (not needed to run the app).
+# Install: pip install -r requirements-dev.txt
+pytest>=8.0
+pytest-qt>=4.4        # integration tier — drives real Qt widgets via qtbot
+selenium>=4.20        # E2E tier — headless browser render + console-log capture

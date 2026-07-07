@@ -84,6 +84,21 @@ try:
 except Exception:  # noqa: BLE001
     TablePlugin = None  # type: ignore[assignment,misc]
 
+try:
+    from charts.plugins.area_map import AreaMapPlugin
+except Exception:  # noqa: BLE001
+    AreaMapPlugin = None  # type: ignore[assignment,misc]
+
+try:
+    from charts.plugins.point_map import PointMapPlugin
+except Exception:  # noqa: BLE001
+    PointMapPlugin = None  # type: ignore[assignment,misc]
+
+try:
+    from charts.plugins.custom_html import CustomHtmlPlugin
+except Exception:  # noqa: BLE001
+    CustomHtmlPlugin = None  # type: ignore[assignment,misc]
+
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
@@ -98,6 +113,9 @@ _ORDERED: list[tuple[str, type[ChartPlugin] | None]] = [
     ("scorecard",         ScorecardPlugin),
     ("combined_bar_line", CombinedBarLinePlugin),
     ("table_view",        TablePlugin),
+    ("area_map",          AreaMapPlugin),
+    ("point_map",         PointMapPlugin),
+    ("custom_html",       CustomHtmlPlugin),
     # ── Hidden legacy plugins (backward compat only) ──
     ("bar_monthly",       BarMonthlyPlugin),
     ("stacked_cat",       StackedCatPlugin),

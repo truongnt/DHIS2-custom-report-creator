@@ -1,7 +1,7 @@
 """
 ScorecardPlugin — renders a single KPI value using Canvas 2D (no Chart.js).
 
-Supported DE types: aggregate, indicator, tracker_numeric.
+Supported DE types: aggregate, indicator, tracker_numeric, tracker_option (event count).
 
 plugin_options keys
 -------------------
@@ -34,7 +34,7 @@ class ScorecardPlugin(ChartPlugin):
             id="metric",
             label="KPI value",
             max_count=1,
-            allowed_types=("aggregate", "indicator", "tracker_numeric"),
+            allowed_types=("aggregate", "indicator", "tracker_numeric", "tracker_option"),
             default_agg="SUM",
         )
     ]
@@ -63,11 +63,14 @@ class ScorecardPlugin(ChartPlugin):
         value_color = _po(po, "value_color", "Green")
         font_size   = _po(po, "font_size",   "Large")
 
+        # Presets OR custom (#hex colour / numeric font size) — REQ-UI-OPT-01.
         _COLORS = {"Green": "#27ae60", "Blue": "#3498db", "Red": "#e74c3c", "Orange": "#f39c12"}
-        color_hex = _COLORS.get(value_color, "#27ae60")
+        color_hex = value_color if str(value_color).startswith("#") \
+            else _COLORS.get(value_color, "#27ae60")
 
         _SIZES = {"Large": "52", "Medium": "38", "Small": "28"}
-        size_px = _SIZES.get(font_size, "52")
+        size_px = str(font_size).strip() if str(font_size).strip().isdigit() \
+            else _SIZES.get(font_size, "52")
 
         # JS format function (inlined as a string literal in the generated JS)
         if y_format == "1,234":
@@ -145,6 +148,19 @@ class ScorecardPlugin(ChartPlugin):
             );
             const valIdx = d.headers.findIndex(h => h.name === 'value');
             const val = (d.rows && d.rows.length) ? parseFloat(d.rows[0][valIdx]) : null;
+            renderChart{n}Real(cvs, val, rpe);"""
+        elif de_type == "tracker_option":
+            # Option-set tracker DE → KPI = total EVENT COUNT of its stage over the period.
+            fetch_block = f"""\
+            const rpe = resolveRelativePeriod(pe);
+            const d = await dhis2Get(
+              'api/analytics/events/aggregate/{prog_uid}?stage={stage_uid}'
+              +'&dimension=pe:'+encodeURIComponent(rpe)
+              +'&dimension=ou:'+encodeURIComponent(ou)+'{extra}'
+            );
+            const valIdx = d.headers.findIndex(h => h.name === 'value');
+            const val = (d.rows && d.rows.length)
+              ? d.rows.reduce((s,r)=>s+(parseFloat(r[valIdx])||0),0) : null;
             renderChart{n}Real(cvs, val, rpe);"""
         else:
             fetch_block = f"""\

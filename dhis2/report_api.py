@@ -77,7 +77,32 @@ def list_reports(client: DHIS2Client) -> list[dict]:
     return data.get("reports", [])
 
 
+def deploy_report(
+    client: DHIS2Client,
+    name: str,
+    html_content: str,
+    relative_periods: dict | None = None,
+    report_params: dict | None = None,
+) -> dict:
+    """
+    Upsert an HTML report by NAME: if a report with the same name already exists it is
+    UPDATED in place (same UID → its link stays valid); otherwise a new one is created.
+    Re-deploying a dashboard therefore overwrites instead of piling up duplicates.
+
+    Returns {"uid": <uid>, "updated": bool, "name": name}.
+    """
+    existing = next((r for r in list_reports(client)
+                     if (r.get("displayName") or "") == name), None)
+    if existing:
+        uid = existing["id"]
+        update_report(client, uid, name, html_content, relative_periods, report_params)
+        return {"uid": uid, "updated": True, "name": name}
+    res = create_report(client, name, html_content, relative_periods, report_params)
+    uid = (res.get("response", {}) or {}).get("uid") or res.get("uid") or ""
+    return {"uid": uid, "updated": False, "name": name}
+
+
 def report_url(base_url: str, report_uid: str) -> str:
-    """Direct URL to run the report in DHIS2 web UI."""
+    """Direct URL to open the standard HTML report in the DHIS2 web UI."""
     base = base_url.rstrip("/").replace("/api", "")
-    return f"{base}/dhis-web-reporting/getReport.action?uid={report_uid}&type=HTML&mode=REPORT"
+    return f"{base}/dhis-web-reports/index.html#/standard-report/view/{report_uid}"

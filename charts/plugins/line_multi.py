@@ -31,14 +31,8 @@ from charts.plugins.base import (
 
 # ── Palettes ──────────────────────────────────────────────────────────────────
 
-_PALETTES: dict[str, list[str]] = {
-    "Default": ["#e74c3c","#3498db","#f39c12","#27ae60","#9b59b6","#1abc9c","#e67e22","#2980b9"],
-    "DHIS2":   ["#147cd7","#00b5ae","#ff5722","#8bc34a","#e91e63","#ff9800","#9c27b0","#2196f3"],
-    "Warm":    ["#f39c12","#e74c3c","#e67e22","#d35400","#c0392b","#a04000","#f1c40f","#ca6f1e"],
-    "Cool":    ["#2980b9","#3498db","#1abc9c","#16a085","#5dade2","#48c9b0","#76d7c4","#85c1e9"],
-    "Earth":   ["#6e2f21","#935116","#7d6608","#1e8449","#4a235a","#117a65","#b9770e","#17202a"],
-    "Pastel":  ["#f1948a","#7fb3d3","#f8c471","#82e0aa","#c39bd3","#73c6b6","#f0b27a","#abebc6"],
-}
+# Distinct-adjacent categorical palettes, shared across all chart plugins.
+from charts.plugins.shared_js import PALETTES as _PALETTES
 
 
 def _po(po: dict, key: str, default):
@@ -119,7 +113,11 @@ def _chartjs_options(po: dict) -> str:
       }}"""
 
 
-def _sample_js(n: int, po: dict, color_scheme: str = "Default") -> str:
+def _sample_js(n: int, po: dict, color_scheme: str = "Default",
+               metric_labels=None) -> str:
+    _ml = [s for s in (metric_labels or []) if s]
+    label_a = _json.dumps(_ml[0] if len(_ml) >= 1 else "Series A")
+    label_b = _json.dumps(_ml[1] if len(_ml) >= 2 else "Series B")
     tension_raw = _po(po, "line_tension", "Smooth")
     tension     = "0.3" if tension_raw == "Smooth" else "0"
     fill        = _po(po, "fill_area", "None") == "Fill"
@@ -143,13 +141,13 @@ def _sample_js(n: int, po: dict, color_scheme: str = "Default") -> str:
               labels: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
               datasets: [
                 {{
-                  label: 'Series A',
+                  label: {label_a},
                   data: {da},
                   borderColor: PALETTE[0], backgroundColor: {fill_bg0},
                   fill: {_jsbool(fill)}, tension: {tension}, pointRadius: 4, pointHoverRadius: 6,
                 }},
                 {{
-                  label: 'Series B',
+                  label: {label_b},
                   data: {db},
                   borderColor: PALETTE[1], backgroundColor: {fill_bg1},
                   fill: {_jsbool(fill)}, tension: {tension}, pointRadius: 4, pointHoverRadius: 6,
@@ -245,6 +243,13 @@ def _real_js_mixed(n: int, sources: list[dict], config: dict, po: dict,
                 f"stage={s['stage_uid']}&value={s['uid']}&aggregationType=SUM"
                 f"&dimension=pe:'+encodeURIComponent(rpe)+'&dimension=ou:'+encodeURIComponent(ou)+'{extra}')"
             )
+        elif s["type"] == "tracker_option":
+            # Option-set tracker DE → EVENT COUNT per period for its stage.
+            fetch_calls.append(
+                f"dhis2Get('api/analytics/events/aggregate/{s['prog_uid']}?"
+                f"stage={s['stage_uid']}"
+                f"&dimension=pe:'+encodeURIComponent(rpe)+'&dimension=ou:'+encodeURIComponent(ou)+'{extra}')"
+            )
         else:
             fetch_calls.append(
                 f"dhis2Get('api/analytics.json?dimension=dx:{s['uid']}"
@@ -278,8 +283,8 @@ def _real_js_mixed(n: int, sources: list[dict], config: dict, po: dict,
             const peIdx  = d.headers.findIndex(h => h.name === 'pe');
             const valIdx = d.headers.findIndex(h => h.name === 'value');
             const vals = allPeriods.map(p => {{
-              const row = d.rows.find(r => r[peIdx] === p);
-              return row ? parseFloat(row[valIdx]) || 0 : 0;
+              return d.rows.filter(r => r[peIdx] === p)
+                           .reduce((s, r) => s + (parseFloat(r[valIdx]) || 0), 0);
             }});
             return {{
               label: DE_NAMES[i], data: vals,
@@ -333,7 +338,7 @@ class LineMultiPlugin(ChartPlugin):
             id="metrics",
             label="Metrics to compare",
             max_count=3,
-            allowed_types=("tracker_numeric", "aggregate", "indicator"),
+            allowed_types=("tracker_numeric", "tracker_option", "aggregate", "indicator"),
             default_agg="SUM",
             required=True,
         )
@@ -364,7 +369,8 @@ class LineMultiPlugin(ChartPlugin):
         if len(sources) > 3:
             sources = sources[:3]
 
-        sample  = _sample_js(n, po, color_scheme)
+        sample  = _sample_js(n, po, color_scheme,
+                             metric_labels=[s.get("name") for s in sources if s.get("name")])
         all_agg = all(s.get("type", "aggregate") in ("aggregate", "indicator") for s in sources)
         if all_agg:
             real = _real_js_all_aggregate(n, sources, config, po, color_scheme)

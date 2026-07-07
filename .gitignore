@@ -12,7 +12,17 @@ env/
 
 # App cache / runtime data
 cache/
+data/
 *.json
+logs/
+debug/
+config/html_templates/
+
+# Generated exports
+*.xlsx
+
+# Test evidence (screenshots, console logs, reports)
+test-evidence/
 
 # IDE
 .vscode/

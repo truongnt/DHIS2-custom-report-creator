@@ -40,7 +40,18 @@ class GroupedBarPlugin(ChartPlugin):
     # ── JS generators ─────────────────────────────────────────────────────────
 
     @classmethod
-    def _sample_js(cls, n: int) -> str:
+    def _sample_js(cls, n: int, metric_labels=None) -> str:
+        import json as _json
+        _ml = [s for s in (metric_labels or []) if s]
+        _defaults = ["Group A", "Group B", "Group C"]
+        _demo = [[80,95,70,110,130,115], [60,72,55,88,100,92], [45,58,40,65,78,70]]
+        # One group per selected metric (so the legend shows real names), default to 3 demo groups.
+        _names = _ml if _ml else _defaults
+        _names = _names[:3]
+        datasets_js = ",\n                ".join(
+            f"{{label:{_json.dumps(_names[i])}, data:{_demo[i]}, backgroundColor:PALETTE[{i}]}}"
+            for i in range(len(_names))
+        )
         return f"""\
         let chart{n}Inst = null;
         function renderChart{n}Sample(cvs) {{
@@ -51,9 +62,7 @@ class GroupedBarPlugin(ChartPlugin):
             data: {{
               labels: ['Jan','Feb','Mar','Apr','May','Jun'],
               datasets: [
-                {{label:'Group A', data:[80,95,70,110,130,115], backgroundColor:PALETTE[0]}},
-                {{label:'Group B', data:[60,72,55,88,100,92],  backgroundColor:PALETTE[1]}},
-                {{label:'Group C', data:[45,58,40,65,78,70],   backgroundColor:PALETTE[2]}}
+                {datasets_js}
               ]
             }},
             options: {{
@@ -184,8 +193,8 @@ class GroupedBarPlugin(ChartPlugin):
             const peIdx  = d.headers.findIndex(h => h.name === 'pe');
             const valIdx = d.headers.findIndex(h => h.name === 'value');
             const vals = allPeriods.map(p => {{
-              const row = d.rows.find(r => r[peIdx] === p);
-              return row ? parseFloat(row[valIdx]) || 0 : 0;
+              return d.rows.filter(r => r[peIdx] === p)
+                           .reduce((s, r) => s + (parseFloat(r[valIdx]) || 0), 0);
             }});
             return {{
               label: DE_NAMES[i],
@@ -248,7 +257,7 @@ class GroupedBarPlugin(ChartPlugin):
         if len(sources) > 3:
             sources = sources[:3]
 
-        sample = cls._sample_js(n)
+        sample = cls._sample_js(n, metric_labels=[s.get("name") for s in sources if s.get("name")])
 
         all_agg = all(s.get("type", "aggregate") in ("aggregate", "indicator") for s in sources)
         if all_agg:

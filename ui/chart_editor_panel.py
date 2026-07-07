@@ -28,13 +28,74 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QWidget, QFrame, QLabel, QPushButton, QCheckBox, QRadioButton,
-    QLineEdit, QTextEdit, QComboBox, QScrollArea, QSplitter,
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QScrollArea, QSplitter,
     QVBoxLayout, QHBoxLayout, QGridLayout, QSizePolicy,
-    QInputDialog, QMessageBox, QButtonGroup,
+    QInputDialog, QMessageBox, QButtonGroup, QCompleter, QDialog, QColorDialog,
+    QFileDialog,
 )
 
 from charts.fixed_templates import FIXED_TEMPLATES
-from ui.qt_utils import SegmentedButton, section_label, divider, DHIS2_BLUE, PANEL_BG, BORDER_CLR
+from charts.plugins.base import SelectControl, CheckboxGroupControl, TextAreaControl
+from ui.qt_utils import (SegmentedButton, DEPickerWidget, section_label, divider,
+                         DHIS2_BLUE, PANEL_BG, BORDER_CLR)
+
+# A combobox popup is a TOP-LEVEL window, so a QSS rule on an ancestor (the panel)
+# does NOT reach it. The popup's view is only styled reliably when the rule is set
+# on the combobox itself. Apply this per-combobox (see _style_combo).
+_COMBO_QSS = (
+    "QComboBox { background:#ffffff; color:#1e2d3d; border:1px solid #c0cdd8;"
+    "  border-radius:4px; padding:1px 8px; }"
+    "QComboBox:focus { border-color:#1a6fa8; }"
+    "QComboBox::drop-down { border:none; width:18px; }"
+    "QComboBox QAbstractItemView { background:#ffffff; color:#1e2d3d;"
+    "  border:1px solid #c0cdd8; padding:2px;"
+    "  selection-background-color:#1a6fa8; selection-color:#ffffff; outline:0; }"
+)
+
+
+def _style_combo(combo) -> None:
+    """Force a light, readable popup on a QComboBox (overrides OS dark popups)."""
+    combo.setStyleSheet(_COMBO_QSS)
+    try:                      # also style the view object directly (belt & braces)
+        combo.view().setStyleSheet(
+            "background:#ffffff; color:#1e2d3d; selection-background-color:#1a6fa8;"
+            " selection-color:#ffffff;")
+    except Exception:
+        pass
+
+
+class _MultiToggleWidget(QWidget):
+    """Row of toggle buttons — multiple can be active simultaneously."""
+    changed = Signal()
+
+    def __init__(self, choices: list[str], parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background:transparent;")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        self._btns: dict[str, QPushButton] = {}
+        for ch in choices:
+            btn = QPushButton(ch)
+            btn.setCheckable(True)
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(
+                "QPushButton{font-size:9px;padding:2px 6px;border:1px solid #1a6fa8;"
+                "border-radius:3px;background:#fff;color:#1a6fa8;}"
+                "QPushButton:checked{background:#1a6fa8;color:#fff;}"
+            )
+            btn.clicked.connect(self.changed)
+            self._btns[ch] = btn
+            lay.addWidget(btn)
+        lay.addStretch()
+
+    def get(self) -> str:
+        return ",".join(ch for ch, btn in self._btns.items() if btn.isChecked())
+
+    def set(self, value: str) -> None:
+        selected = {v.strip() for v in str(value).split(",") if v.strip()}
+        for ch, btn in self._btns.items():
+            btn.setChecked(ch in selected)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -266,7 +327,24 @@ class _ChartTile(QFrame):
 
 # ── Main panel ────────────────────────────────────────────────────────────────
 
+def _short_model_name(model_id: str) -> str:
+    """Friendly short name for the button label (e.g. 'claude-opus-4-8' → 'Opus')."""
+    m = (model_id or "").lower()
+    if "opus" in m:
+        return "Opus"
+    if "sonnet" in m:
+        return "Sonnet"
+    if "haiku" in m:
+        return "Haiku"
+    return "AI"
+
+
 class ChartEditorPanel(QWidget):
+
+    # Marshal a callable from a worker thread back onto the GUI thread. (QTimer.singleShot
+    # does NOT cross threads — a plain threading.Thread has no Qt event loop — so worker
+    # results must come home via a queued signal.)
+    _call_main = Signal(object)
 
     _FILTER_OPS = ["EQ", "≠ (NE)", "IN", ">", "≥", "<", "≤", "LIKE"]
     _OP_MAP = {
@@ -277,6 +355,8 @@ class ChartEditorPanel(QWidget):
     def __init__(self, parent=None, callbacks: dict[str, Callable] | None = None, **kw):
         super().__init__(parent)
         self._callbacks = callbacks or {}
+        # Run worker-thread callbacks on the GUI thread (queued across threads).
+        self._call_main.connect(lambda fn: fn())
 
         # ── State ─────────────────────────────────────────────────────────────
         self._custom_options: dict = {}
@@ -284,9 +364,12 @@ class ChartEditorPanel(QWidget):
         self._metadata: dict = {}
         self._programs: list[dict] = []
         self._agg_des: list[dict] = []
+        self._agg_indicators: list[dict] = []   # aggregate indicators (loaded on demand)
+        self._indicators_loaded = False
+        self._indicators_loading = False
+        self._dhis2_client = None   # set by app_window after connect
+        self._in_use: set[str] = set()   # curated in-use UIDs (Metadata Library); empty = none offered
         self._current_de_items: list[dict] = []
-        self._de_checkboxes: list[tuple[dict, QCheckBox]] = []
-        self._metric_rows: list[tuple] = []          # (de, cb, agg_combo | None)
         self._selected_metrics: list[dict] = []
         self._selected_template: dict | None = None
         self._selected_plugin = None
@@ -302,9 +385,15 @@ class ChartEditorPanel(QWidget):
         self._my_charts_visible = False
         self._current_prog = None
         self._chat_display_text = ""
+        # Identity of the chart currently being edited (None = a new, unsaved chart).
+        self._current_chart_id: str | None = None
+        self._current_chart_name: str | None = None
+        self._current_chart_description: str = ""
 
         # Dimension state
         self._select_vars: dict[str, SegmentedButton] = {}
+        self._textarea_vars: dict = {}   # opt_id -> QPlainTextEdit (e.g. Custom HTML template)
+        self._html_highlighter = None    # syntax highlighter for the Custom HTML editor
         self._filter_rows: list[dict] = []
 
         # Preview timer
@@ -322,7 +411,22 @@ class ChartEditorPanel(QWidget):
         root_lay = QVBoxLayout(self)
         root_lay.setContentsMargins(0, 0, 0, 0)
         root_lay.setSpacing(0)
-        self.setStyleSheet(f"background:{PANEL_BG};")
+        # Panel-local combobox/list styling — the global APP_QSS popup rule does not
+        # reliably reach comboboxes nested under widgets that set their own background,
+        # so the dropdown popup rendered dark/unreadable. Force a light, readable popup.
+        self.setStyleSheet(
+            f"background:{PANEL_BG};"
+            "QComboBox { background:#ffffff; color:#1e2d3d; border:1px solid #c0cdd8;"
+            "  border-radius:4px; padding:2px 8px; }"
+            "QComboBox:focus { border-color:#1a6fa8; }"
+            "QComboBox::drop-down { border:none; width:18px; }"
+            "QComboBox QAbstractItemView { background:#ffffff; color:#1e2d3d;"
+            "  border:1px solid #c0cdd8; selection-background-color:#1a6fa8;"
+            "  selection-color:#ffffff; outline:none; }"
+            "QLineEdit { background:#ffffff; color:#1e2d3d; border:1px solid #c0cdd8;"
+            "  border-radius:4px; padding:2px 6px; }"
+            "QLineEdit:focus { border-color:#1a6fa8; }"
+        )
 
         # 1. Header bar
         root_lay.addWidget(self._build_header())
@@ -378,6 +482,12 @@ class ChartEditorPanel(QWidget):
         title = QLabel("Chart Editor")
         title.setStyleSheet("font-size:12px; font-weight:bold; color:#3a5068; background:transparent;")
         lay.addWidget(title)
+
+        # Shows which saved chart is being edited (or "new chart").
+        self._chart_name_lbl = QLabel("• new chart")
+        self._chart_name_lbl.setStyleSheet(
+            "font-size:11px; color:#5a7a9a; background:transparent; font-style:italic;")
+        lay.addWidget(self._chart_name_lbl)
         lay.addStretch()
 
         self._my_charts_btn = QPushButton("📚 My Charts ▶")
@@ -464,8 +574,8 @@ class ChartEditorPanel(QWidget):
         lay.setContentsMargins(6, 5, 6, 5)
         lay.setSpacing(2)
 
-        tmpl_icon = next((t["icon"] for t in FIXED_TEMPLATES
-                          if t["id"] == chart.get("template_id")), "📊")
+        _tid = chart.get("template_id") or chart.get("plugin_id")   # template id == plugin id
+        tmpl_icon = next((t["icon"] for t in FIXED_TEMPLATES if t["id"] == _tid), "📊")
         name = (chart.get("name") or chart.get("title", "?"))[:16]
 
         name_lbl = QLabel(f"{tmpl_icon} {name}")
@@ -492,17 +602,25 @@ class ChartEditorPanel(QWidget):
         self._mc_hlay.addWidget(card)
 
     def _load_chart_config(self, chart: dict):
-        tmpl = next((t for t in FIXED_TEMPLATES
-                     if t["id"] == chart.get("template_id")), None)
+        # Track identity so a subsequent Save updates this entity (not a duplicate).
+        self._current_chart_id = chart.get("id")
+        self._current_chart_name = chart.get("name") or chart.get("title")
+        self._current_chart_description = chart.get("description", "")
+        self._update_chart_name_lbl()
+
+        # 1) Chart type — rebuilds the dynamic option / dimension / filter widgets.
+        #    template id == plugin id (as_template_dict), so fall back to plugin_id for charts
+        #    saved without a template_id (e.g. built programmatically / imported).
+        _tid = chart.get("template_id") or chart.get("plugin_id")
+        tmpl = next((t for t in FIXED_TEMPLATES if t["id"] == _tid), None)
         if tmpl:
             self._on_chart_type_click(tmpl)
 
+        # 2) Simple scalar fields.
         self._title_entry.setText(chart.get("title") or chart.get("name", ""))
-
         color = chart.get("chart_color")
         if color:
             self._on_color_select(color)
-
         col_seg = {12: "Full", 6: "Half", 4: "Third"}
         self._col_width_seg.set(col_seg.get(chart.get("col_width", 6), "Half"))
 
@@ -513,33 +631,165 @@ class ChartEditorPanel(QWidget):
             self._chat_display.setPlainText(self._chat_display_text)
             self._chat_display.setReadOnly(True)
 
-        sources = chart.get("de_sources", [])
-        if sources:
-            first_de = sources[0]
-            de_type = first_de.get("type", "")
-            prog_name = first_de.get("prog_name", "")
-            if de_type in ("tracker_option", "tracker_numeric") and prog_name:
-                self._src_prog_cb.setChecked(True)
-                self._src_agg_cb.setChecked(False)
-                prog = next((p for p in self._programs
-                             if p["displayName"] == prog_name), None)
-                if prog:
-                    idx = self._prog_menu.findText(prog_name)
-                    if idx >= 0:
-                        self._prog_menu.setCurrentIndex(idx)
-                    self._on_prog_selected()
-            elif de_type == "aggregate":
-                self._src_prog_cb.setChecked(False)
-                self._src_agg_cb.setChecked(True)
-                self._on_src_check()
+        dims = chart.get("dimensions") or {}
 
-            saved_uids = {d.get("uid") for d in sources}
-            QTimer.singleShot(100, lambda: self._try_select_saved_des(saved_uids))
+        # 3) Style / plugin options (widgets already rebuilt by step 1).
+        for k, v in (chart.get("plugin_options") or {}).items():
+            seg = self._select_vars.get(k)
+            if seg is not None:
+                try:
+                    seg.set(v)
+                except Exception:
+                    pass
+            ta = self._textarea_vars.get(k)
+            if ta is not None:
+                ta.setPlainText(str(v))
+            w = self._option_vars.get(k)
+            if isinstance(w, QCheckBox):
+                w.setChecked(bool(v))
+            elif isinstance(w, SegmentedButton):
+                try:
+                    w.set(v)
+                except Exception:
+                    pass
+            elif isinstance(w, QLineEdit):
+                w.setText(str(v))
+
+        if dims.get("time_grain"):
+            try:
+                self._time_grain_seg.set(dims["time_grain"])
+            except Exception:
+                pass
+        rl = dims.get("row_limit", 0)
+        self._row_limit_combo.setCurrentText("All" if not rl else str(rl))
+        if dims.get("sort_by"):
+            self._sort_by_combo.setCurrentText(dims["sort_by"])
+        if dims.get("sort_dir"):
+            self._sort_dir_combo.setCurrentText(dims["sort_dir"])
+
+        # 4) Source (program + stage, or aggregate). Selecting these populates the DE
+        #    lists, which the metrics/dimension/filter restore (step 5) depends on.
+        src = chart.get("source") or {}
+        metrics = chart.get("metrics") or chart.get("de_sources") or []
+        first = metrics[0] if metrics else {}
+        de_type   = src.get("type")      or first.get("type", "")
+        prog_uid  = src.get("prog_uid")  or first.get("prog_uid", "")
+        prog_name = src.get("prog_name") or first.get("prog_name", "")
+        stage_name = src.get("stage_name") or first.get("stage_name", "")
+        # Three "dx-like" cases share type "indicator"; disambiguate by prog_uid:
+        #   program-scoped (PI, has prog_uid) → program source;
+        #   aggregate indicator (no prog_uid) → aggregate source.
+        is_pi      = de_type == "indicator" and bool(prog_uid)
+        is_agg_ind = de_type == "indicator" and not prog_uid
+        if de_type in ("tracker_option", "tracker_numeric") or is_pi:
+            self._src_prog_cb.setChecked(True)
+            self._src_agg_cb.setChecked(False)
+            self._src_ind_cb.setChecked(False)
+            if is_pi and "PI" in self._kind_cbs:
+                self._kind_cbs["PI"].setChecked(True)
+            self._on_src_check()
+            prog = next((p for p in self._programs if p.get("id") == prog_uid), None) \
+                or next((p for p in self._programs if p["displayName"] == prog_name), None)
+            if prog:
+                idx = self._prog_menu.findText(prog["displayName"])
+                if idx >= 0:
+                    self._prog_menu.setCurrentIndex(idx)   # → _on_prog_selected
+                else:
+                    self._on_prog_selected()
+                if stage_name:
+                    sidx = self._stage_menu.findText(stage_name)
+                    if sidx >= 0:
+                        self._stage_menu.setCurrentIndex(sidx)  # → _on_stage_selected
+        elif is_agg_ind:
+            self._src_prog_cb.setChecked(False)
+            self._src_agg_cb.setChecked(False)
+            self._src_ind_cb.setChecked(True)          # → _on_src_check triggers lazy load
+            self._on_src_check()
+        elif de_type == "aggregate":
+            self._src_prog_cb.setChecked(False)
+            self._src_agg_cb.setChecked(True)
+            self._src_ind_cb.setChecked(False)
+            self._on_src_check()
+
+        # 5) Metrics / dimension / filters depend on the DE lists, which refresh on the
+        #    next event-loop tick (see _on_stage_selected) — restore after they settle.
+        QTimer.singleShot(120, lambda: self._restore_selection(chart))
+
+    def _restore_selection(self, chart: dict):
+        """Restore metric DEs, the split-by dimension, and filter rows (deferred so the
+        available-DE lists are populated first)."""
+        dims = chart.get("dimensions") or {}
+        metrics = chart.get("metrics") or chart.get("de_sources") or []
+        uids = [m.get("uid") for m in metrics if m.get("uid")]
+        agg_map = {m.get("uid", ""): m.get("agg", "SUM") for m in metrics}
+        # Restore alias: prefer explicit 'alias', else derive from a saved name that
+        # differs from the real DE name (older saves stored alias in 'name').
+        alias_map = {}
+        for m in metrics:
+            uid = m.get("uid", "")
+            alias = (m.get("alias") or "").strip()
+            if not alias and m.get("orig_name") and m.get("name") not in (None, m.get("orig_name")):
+                alias = m["name"]
+            if alias:
+                alias_map[uid] = alias
+        # Pass the saved metric dicts as `known` so the selection restores even when the
+        # item isn't in the available list yet (e.g. indicators loaded on demand). Use the
+        # REAL name (orig_name) for the chip — the alias is carried separately via alias_map,
+        # otherwise the chip would show the alias as its name (no real name visible).
+        known = {}
+        for m in metrics:
+            if not m.get("uid"):
+                continue
+            d = dict(m)
+            d["name"] = m.get("orig_name") or m.get("name") or m["uid"]
+            known[m["uid"]] = d
+        self._metrics_picker.set_selected_uids(uids, agg_map, alias_map, known=known)
+        self._on_de_check()
+
+        # Restore ALL dimensions (group_by) with their aliases; fall back to the single
+        # legacy `dimension` for older saves.
+        gb = dims.get("group_by") or ([dims["dimension"]] if dims.get("dimension") else [])
+        gb = [d for d in gb if isinstance(d, dict) and d.get("uid")]
+        if gb:
+            dim_uids = [d["uid"] for d in gb]
+            dim_alias = {}
+            for d in gb:
+                a = (d.get("alias") or "").strip()
+                if not a and d.get("orig_name") and d.get("name") not in (None, d.get("orig_name")):
+                    a = d["name"]
+                if a:
+                    dim_alias[d["uid"]] = a
+            self._dim_picker.set_selected_uids(dim_uids, alias_map=dim_alias)
+
+        for rd in list(self._filter_rows):
+            self._remove_filter_row(rd)
+        rev_op = {v: k for k, v in self._OP_MAP.items()}
+        for f in dims.get("filters", []):
+            self._add_filter_row()
+            rd = self._filter_rows[-1]
+            if f.get("de_name") or f.get("de_uid"):
+                # Combo items are "(DE) Name"; match the saved filter by uid → its label.
+                from ui.metadata_display import plain_label
+                label = next((plain_label(d) for d in self._current_de_items
+                              if d.get("uid") == f.get("de_uid")), f.get("de_name", ""))
+                rd["de_menu"].setCurrentText(label)          # → _on_filter_de_changed
+            rd["op_menu"].setCurrentText(rev_op.get(f.get("op", "EQ"), "EQ"))
+            val = f.get("value", "")
+            vc = rd.get("val_combo")
+            if rd.get("use_combo") and vc is not None:
+                i = next((k for k in range(vc.count()) if vc.itemData(k) == val), -1)
+                if i >= 0:
+                    vc.setCurrentIndex(i)
+            else:
+                rd["val_entry"].setText(str(val))
+
+        self._update_action_buttons()
+        self._auto_preview()
 
     def _try_select_saved_des(self, uids: set):
-        for de, cb, *_ in self._de_checkboxes:
-            if de["uid"] in uids:
-                cb.setChecked(True)
+        agg_map = {d.get("uid", ""): d.get("agg", "SUM")
+                   for d in self._selected_metrics}
+        self._metrics_picker.set_selected_uids(list(uids), agg_map)
         self._on_de_check()
 
     # =========================================================================
@@ -627,7 +877,7 @@ class ChartEditorPanel(QWidget):
 
         outer = _make_card()
         outer_lay = QVBoxLayout(outer)
-        outer_lay.setContentsMargins(10, 8, 10, 8)
+        outer_lay.setContentsMargins(10, 8, 10, 24)   # extra bottom space so last row isn't flush
         outer_lay.setSpacing(6)
 
         # Checkboxes row
@@ -646,6 +896,13 @@ class ChartEditorPanel(QWidget):
         self._src_agg_cb.setChecked(False)
         self._src_agg_cb.stateChanged.connect(self._on_src_check)
         cb_lay.addWidget(self._src_agg_cb)
+
+        # Indicators are a standalone dx domain (like PI) — NOT tied to datasets/DEs.
+        # Their own source toggle; loaded on demand to avoid pulling them needlessly.
+        self._src_ind_cb = QCheckBox("Indicators")
+        self._src_ind_cb.setChecked(False)
+        self._src_ind_cb.stateChanged.connect(self._on_src_check)
+        cb_lay.addWidget(self._src_ind_cb)
         cb_lay.addStretch()
         outer_lay.addWidget(cb_row)
 
@@ -653,6 +910,7 @@ class ChartEditorPanel(QWidget):
         self._prog_menu = QComboBox()
         self._prog_menu.addItem("—")
         self._prog_menu.setFixedHeight(30)
+        _style_combo(self._prog_menu)
         self._prog_menu.currentTextChanged.connect(self._on_prog_selected)
         outer_lay.addWidget(self._prog_menu)
 
@@ -660,16 +918,31 @@ class ChartEditorPanel(QWidget):
         self._stage_menu = QComboBox()
         self._stage_menu.addItem("—")
         self._stage_menu.setFixedHeight(30)
+        _style_combo(self._stage_menu)
         self._stage_menu.currentTextChanged.connect(self._on_stage_selected)
         outer_lay.addWidget(self._stage_menu)
 
-        # Agg search entry (hidden by default)
-        self._agg_search_entry = QLineEdit()
-        self._agg_search_entry.setPlaceholderText("🔍 Search aggregate DEs...")
-        self._agg_search_entry.setFixedHeight(30)
-        self._agg_search_entry.textChanged.connect(self._refresh_metrics_display)
-        self._agg_search_entry.setVisible(False)
-        outer_lay.addWidget(self._agg_search_entry)
+        # Kind filter (Program source): show Data Elements / Program Attributes /
+        # Program Indicators independently. All on by default.
+        self._kind_row = QWidget()
+        self._kind_row.setStyleSheet("background:transparent;")
+        _kind_lay = QHBoxLayout(self._kind_row)
+        _kind_lay.setContentsMargins(0, 0, 0, 0)
+        _kind_lay.setSpacing(16)
+        _kind_lay.addWidget(QLabel("Show:"))
+        self._kind_cbs: dict[str, QCheckBox] = {}
+        for _k, _lbl in (("DE", "Data elements"), ("PA", "Attributes"), ("PI", "Program indicators")):
+            cb = QCheckBox(_lbl)
+            cb.setChecked(True)
+            cb.setStyleSheet("font-size:11px; background:transparent;")
+            cb.stateChanged.connect(self._on_kind_filter_change)
+            self._kind_cbs[_k] = cb
+            _kind_lay.addWidget(cb)
+        _kind_lay.addStretch()
+        outer_lay.addWidget(self._kind_row)
+
+        # (No source-level search box — each picker has its own search; a second one here
+        #  was redundant. Load status is shown on the metrics picker's search placeholder.)
 
         parent_lay.addWidget(outer)
 
@@ -678,86 +951,24 @@ class ChartEditorPanel(QWidget):
     # =========================================================================
 
     def _build_metrics_section(self, parent_lay: QVBoxLayout):
-        self._metrics_section_lbl = QLabel("3. METRICS  (TICK 1)")
+        self._metrics_section_lbl = QLabel("3. METRICS  (SELECT 1)")
         self._metrics_section_lbl.setStyleSheet(
             "color:#8aa3b8; font-size:9px; font-weight:bold; padding:6px 12px 2px 12px;"
             "background:transparent;"
         )
         parent_lay.addWidget(self._metrics_section_lbl)
-        # Alias for backward compat
-        self._de_section_lbl = self._metrics_section_lbl
+        self._de_section_lbl = self._metrics_section_lbl  # backward compat
 
         outer = _make_card()
         outer_lay = QVBoxLayout(outer)
-        outer_lay.setContentsMargins(4, 6, 4, 4)
+        outer_lay.setContentsMargins(6, 6, 6, 6)
         outer_lay.setSpacing(4)
 
-        # Search bar row
-        search_row = QWidget()
-        search_row.setStyleSheet("background:transparent;")
-        sr_lay = QHBoxLayout(search_row)
-        sr_lay.setContentsMargins(0, 0, 0, 0)
-        sr_lay.setSpacing(2)
-
-        self._de_search_entry = QLineEdit()
-        self._de_search_entry.setPlaceholderText("🔍 Filter DEs...")
-        self._de_search_entry.setFixedHeight(26)
-        self._de_search_entry.textChanged.connect(self._on_de_search_changed)
-        sr_lay.addWidget(self._de_search_entry, stretch=1)
-
-        clr_btn = QPushButton("✕")
-        clr_btn.setFixedSize(26, 26)
-        clr_btn.setStyleSheet(
-            "QPushButton { background:#e8eef5; border:1px solid #c0cdd8; "
-            "border-radius:4px; color:#5a7a9a; font-size:10px; }"
-            "QPushButton:hover { background:#d0dde8; }"
-        )
-        clr_btn.clicked.connect(lambda: self._de_search_entry.clear())
-        sr_lay.addWidget(clr_btn)
-        outer_lay.addWidget(search_row)
-
-        # Scrollable DE list
-        self._metrics_scroll = QScrollArea()
-        self._metrics_scroll.setWidgetResizable(True)
-        self._metrics_scroll.setFrameShape(QFrame.NoFrame)
-        self._metrics_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._metrics_scroll.setFixedHeight(140)
-        self._metrics_scroll.setStyleSheet("background:white;")
-
-        self._metrics_inner = QWidget()
-        self._metrics_inner.setStyleSheet("background:white;")
-        self._metrics_inner_lay = QVBoxLayout(self._metrics_inner)
-        self._metrics_inner_lay.setContentsMargins(2, 2, 2, 2)
-        self._metrics_inner_lay.setSpacing(1)
-
-        placeholder = QLabel("Select chart type first")
-        placeholder.setStyleSheet("color:#8aa3b8; font-size:10px;")
-        placeholder.setAlignment(Qt.AlignCenter)
-        self._metrics_inner_lay.addWidget(placeholder)
-        self._metrics_inner_lay.addStretch()
-
-        self._metrics_scroll.setWidget(self._metrics_inner)
-        outer_lay.addWidget(self._metrics_scroll)
-
-        # Alias
-        self._de_scroll = self._metrics_scroll
+        self._metrics_picker = DEPickerWidget(max_count=1, show_agg=True, avail_height=100)
+        self._metrics_picker.changed.connect(self._on_de_check)
+        outer_lay.addWidget(self._metrics_picker)
 
         parent_lay.addWidget(outer)
-
-        # Selected DEs label
-        self._sel_lbl = QLabel("")
-        self._sel_lbl.setStyleSheet(
-            "color:#1565c0; font-size:10px; background:transparent; padding:2px 10px;"
-        )
-        self._sel_lbl.setWordWrap(True)
-        parent_lay.addWidget(self._sel_lbl)
-
-    def _on_de_search_changed(self, text: str):
-        q = text.strip().lower()
-        filtered = [i for i in self._current_de_items if q in i["name"].lower()] \
-            if q else self._current_de_items
-        checked = {de["uid"] for de, cb, *_ in self._de_checkboxes if cb.isChecked()}
-        self._populate_de_list(filtered, preserve_checked=checked)
 
     # =========================================================================
     # Section: Dimensions
@@ -770,15 +981,6 @@ class ChartEditorPanel(QWidget):
         outer_lay = QVBoxLayout(outer)
         outer_lay.setContentsMargins(8, 6, 8, 8)
         outer_lay.setSpacing(4)
-
-        # ── SelectControls (plugin.options) ───────────────────────────────────
-        self._select_controls_frame = QWidget()
-        self._select_controls_frame.setStyleSheet("background:white;")
-        self._select_controls_lay = QVBoxLayout(self._select_controls_frame)
-        self._select_controls_lay.setContentsMargins(0, 0, 0, 0)
-        self._select_controls_lay.setSpacing(2)
-        self._select_controls_frame.setVisible(False)
-        outer_lay.addWidget(self._select_controls_frame)
 
         # ── Time grain row ────────────────────────────────────────────────────
         self._time_grain_row = QWidget()
@@ -796,34 +998,28 @@ class ChartEditorPanel(QWidget):
         self._time_grain_row.setVisible(False)
         outer_lay.addWidget(self._time_grain_row)
 
-        # ── Dimension row ─────────────────────────────────────────────────────
-        self._dimension_row = QWidget()
-        self._dimension_row.setStyleSheet("background:transparent;")
-        dim_vlay = QVBoxLayout(self._dimension_row)
-        dim_vlay.setContentsMargins(0, 0, 0, 0)
-        dim_vlay.setSpacing(2)
+        # ── Dimension picker ──────────────────────────────────────────────────
+        self._dim_picker_row = QWidget()
+        self._dim_picker_row.setStyleSheet("background:transparent;")
+        dpick_lay = QVBoxLayout(self._dim_picker_row)
+        dpick_lay.setContentsMargins(0, 2, 0, 0)
+        dpick_lay.setSpacing(2)
 
-        dim_hrow = QWidget()
-        dim_hrow.setStyleSheet("background:transparent;")
-        dim_hlay = QHBoxLayout(dim_hrow)
-        dim_hlay.setContentsMargins(0, 0, 0, 0)
-        dim_hlay.setSpacing(8)
-        dim_lbl = QLabel("Dimension:")
-        dim_lbl.setStyleSheet("font-size:9px; color:#5a7a9a; background:transparent;")
-        dim_hlay.addWidget(dim_lbl)
-        self._dimension_menu = QComboBox()
-        self._dimension_menu.addItem("—")
-        self._dimension_menu.setFixedHeight(26)
-        self._dimension_menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        dim_hlay.addWidget(self._dimension_menu, stretch=1)
-        dim_vlay.addWidget(dim_hrow)
+        split_lbl = QLabel("Split by:")
+        split_lbl.setStyleSheet("font-size:9px; color:#5a7a9a; background:transparent;")
+        dpick_lay.addWidget(split_lbl)
+
+        self._dim_picker = DEPickerWidget(max_count=1, show_agg=False, avail_height=80,
+                                          show_alias=False)
+        self._dim_picker.changed.connect(self._schedule_preview_refresh)
+        dpick_lay.addWidget(self._dim_picker)
 
         self._dim_hint_lbl = QLabel("")
         self._dim_hint_lbl.setStyleSheet("font-size:8px; color:#8aa3b8; background:transparent;")
-        dim_vlay.addWidget(self._dim_hint_lbl)
+        dpick_lay.addWidget(self._dim_hint_lbl)
 
-        self._dimension_row.setVisible(False)
-        outer_lay.addWidget(self._dimension_row)
+        self._dim_picker_row.setVisible(False)
+        outer_lay.addWidget(self._dim_picker_row)
 
         # ── Filters ───────────────────────────────────────────────────────────
         outer_lay.addWidget(self._make_hdiv())
@@ -868,22 +1064,25 @@ class ChartEditorPanel(QWidget):
         self._row_limit_combo = QComboBox()
         self._row_limit_combo.addItems(["10", "20", "50", "100", "200", "All"])
         self._row_limit_combo.setCurrentText("All")
-        self._row_limit_combo.setFixedHeight(22)
+        self._row_limit_combo.setFixedHeight(24)
         self._row_limit_combo.setFixedWidth(64)
+        _style_combo(self._row_limit_combo)
         opts_lay.addWidget(self._row_limit_combo)
 
         opts_lay.addWidget(QLabel("Sort:"))
 
         self._sort_by_combo = QComboBox()
         self._sort_by_combo.addItems(["None", "Value", "Label"])
-        self._sort_by_combo.setFixedHeight(22)
+        self._sort_by_combo.setFixedHeight(24)
         self._sort_by_combo.setFixedWidth(72)
+        _style_combo(self._sort_by_combo)
         opts_lay.addWidget(self._sort_by_combo)
 
         self._sort_dir_combo = QComboBox()
         self._sort_dir_combo.addItems(["Desc", "Asc"])
-        self._sort_dir_combo.setFixedHeight(22)
+        self._sort_dir_combo.setFixedHeight(24)
         self._sort_dir_combo.setFixedWidth(60)
+        _style_combo(self._sort_dir_combo)
         opts_lay.addWidget(self._sort_dir_combo)
         opts_lay.addStretch()
 
@@ -901,16 +1100,25 @@ class ChartEditorPanel(QWidget):
     def _build_style_section(self, parent_lay: QVBoxLayout):
         parent_lay.addWidget(self._sec_lbl("4. Style & Options"))
 
+        # ── Plugin SelectControls (moved from Dimensions) ─────────────────────
+        self._select_controls_frame = QWidget()
+        self._select_controls_frame.setStyleSheet("background:transparent;")
+        self._select_controls_lay = QVBoxLayout(self._select_controls_frame)
+        self._select_controls_lay.setContentsMargins(12, 4, 12, 4)
+        self._select_controls_lay.setSpacing(3)
+        self._select_controls_frame.setVisible(False)
+        parent_lay.addWidget(self._select_controls_frame)
+
         # ── Color ─────────────────────────────────────────────────────────────
-        color_lbl = QLabel("Color")
-        color_lbl.setStyleSheet(
+        self._color_section_lbl = QLabel("Color")
+        self._color_section_lbl.setStyleSheet(
             f"font-size:9px; color:#5a7a9a; padding:4px 12px 0 12px; background:transparent;"
         )
-        parent_lay.addWidget(color_lbl)
+        parent_lay.addWidget(self._color_section_lbl)
 
-        color_row = QWidget()
-        color_row.setStyleSheet("background:transparent;")
-        cr_lay = QHBoxLayout(color_row)
+        self._color_swatch_row = QWidget()
+        self._color_swatch_row.setStyleSheet("background:transparent;")
+        cr_lay = QHBoxLayout(self._color_swatch_row)
         cr_lay.setContentsMargins(12, 0, 12, 4)
         cr_lay.setSpacing(3)
 
@@ -919,8 +1127,28 @@ class ChartEditorPanel(QWidget):
             swatch.clicked.connect(self._on_color_select)
             cr_lay.addWidget(swatch)
             self._color_swatches.append(swatch)
+
+        # Custom colour: a swatch (hidden until a colour is picked) + a picker button.
+        self._custom_color_swatch = _ColorSwatch("#000000")
+        self._custom_color_swatch.setVisible(False)
+        self._custom_color_swatch.clicked.connect(self._on_color_select)
+        cr_lay.addWidget(self._custom_color_swatch)
+        self._color_swatches.append(self._custom_color_swatch)
+
+        pick_btn = QPushButton("🎨")
+        pick_btn.setFixedSize(24, 20)
+        pick_btn.setToolTip("Custom colour…")
+        pick_btn.setCursor(Qt.PointingHandCursor)
+        pick_btn.setStyleSheet(
+            "QPushButton { border:1px solid #c0cdd8; border-radius:2px; background:white;"
+            "  font-size:11px; padding:0; }"
+            "QPushButton:hover { background:#eef3f8; }"
+        )
+        pick_btn.clicked.connect(self._on_pick_custom_color)
+        cr_lay.addWidget(pick_btn)
+
         cr_lay.addStretch()
-        parent_lay.addWidget(color_row)
+        parent_lay.addWidget(self._color_swatch_row)
         self._on_color_select(self._selected_color)
 
         # ── Title + Col Width ──────────────────────────────────────────────────
@@ -1090,6 +1318,29 @@ class ChartEditorPanel(QWidget):
 
     # ── Actions bar ───────────────────────────────────────────────────────────
 
+    # Disabled look shared by every action button (UI rule: a clearly greyed,
+    # non-interactive state when the action isn't usable in the current flow).
+    _BTN_DISABLED_QSS = (
+        "QPushButton:disabled { background:#eef1f4; color:#aab4be; border-color:#dde3e9; }"
+    )
+
+    @staticmethod
+    def _action_btn(text: str, *, fg: str, bg: str, border: str,
+                    hover_bg: str, hover_fg: str | None = None) -> QPushButton:
+        """Action button with an explicit, distinct hover colour + a disabled state."""
+        btn = QPushButton(text)
+        btn.setFixedHeight(30)
+        btn.setCursor(Qt.PointingHandCursor)
+        hf = hover_fg or fg
+        btn.setStyleSheet(
+            f"QPushButton {{ background:{bg}; color:{fg}; border:1px solid {border}; "
+            f"border-radius:4px; font-size:12px; padding:2px 12px; }}"
+            f"QPushButton:hover {{ background:{hover_bg}; color:{hf}; }}"
+            f"QPushButton:pressed {{ background:{hover_bg}; }}"
+            + ChartEditorPanel._BTN_DISABLED_QSS
+        )
+        return btn
+
     def _build_actions(self) -> QWidget:
         bar = QFrame()
         bar.setFixedHeight(46)
@@ -1099,42 +1350,71 @@ class ChartEditorPanel(QWidget):
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(6)
 
-        save_btn = QPushButton("💾 Save")
-        save_btn.setFixedHeight(30)
-        save_btn.setStyleSheet(
-            "QPushButton { background:#8e44ad; color:white; border:none; "
-            "border-radius:4px; font-size:12px; padding:2px 12px; }"
-            "QPushButton:hover { background:#6c3483; }"
-        )
-        save_btn.clicked.connect(self._on_save)
-        lay.addWidget(save_btn)
+        # Each button gets a DISTINCT hover colour so they're visually separable.
+        self._new_btn = self._action_btn(
+            "🆕 New", fg="#5a7a9a", bg="white", border="#b0c0d0", hover_bg="#cdd8e4")
+        self._new_btn.clicked.connect(self._on_new)
+        lay.addWidget(self._new_btn)
 
-        dash_btn = QPushButton("+ Add to Dashboard")
-        dash_btn.setFixedHeight(30)
-        dash_btn.setStyleSheet(
-            "QPushButton { background:#27ae60; color:white; border:none; "
-            "border-radius:4px; font-size:12px; padding:2px 12px; }"
-            "QPushButton:hover { background:#1e8449; }"
-        )
-        dash_btn.clicked.connect(self._on_add_to_dashboard)
-        lay.addWidget(dash_btn)
+        self._open_btn = self._action_btn(
+            "📂 Open", fg="#2c6e49", bg="white", border="#8cc0a4", hover_bg="#cdeedd")
+        self._open_btn.clicked.connect(self._on_open_chart)
+        lay.addWidget(self._open_btn)
 
-        preview_btn = QPushButton("🌐 Preview in Browser")
-        preview_btn.setFixedHeight(30)
-        preview_btn.setStyleSheet(
-            f"QPushButton {{ background:transparent; border:1px solid {DHIS2_BLUE}; "
-            f"color:{DHIS2_BLUE}; border-radius:4px; font-size:12px; padding:2px 12px; }}"
-            f"QPushButton:hover {{ background:#e8f0f8; }}"
-        )
-        preview_btn.clicked.connect(self._on_preview_browser)
-        lay.addWidget(preview_btn)
+        self._save_btn = self._action_btn(
+            "💾 Save", fg="white", bg="#8e44ad", border="#8e44ad", hover_bg="#6c3483")
+        self._save_btn.clicked.connect(self._on_save)
+        lay.addWidget(self._save_btn)
+
+        self._save_as_btn = self._action_btn(
+            "Save As…", fg="#8e44ad", bg="white", border="#8e44ad",
+            hover_bg="#e3c6f0", hover_fg="#5b2c6f")
+        self._save_as_btn.clicked.connect(self._on_save_as)
+        lay.addWidget(self._save_as_btn)
+
+        self._dash_btn = self._action_btn(
+            "+ Add to Dashboard", fg="white", bg="#27ae60", border="#27ae60", hover_bg="#1e8449")
+        self._dash_btn.clicked.connect(self._on_add_to_dashboard)
+        lay.addWidget(self._dash_btn)
+
+        self._preview_btn = self._action_btn(
+            "🌐 Preview in Browser", fg=DHIS2_BLUE, bg="white", border=DHIS2_BLUE,
+            hover_bg="#aed6f1", hover_fg="#1a5276")
+        self._preview_btn.clicked.connect(self._on_preview_browser)
+        lay.addWidget(self._preview_btn)
         lay.addStretch()
 
+        self._update_action_buttons()
         return bar
+
+    def _update_action_buttons(self):
+        """Enable/disable actions based on the current flow state (UI rule:
+        show a disabled colour when an action isn't usable right now)."""
+        if not hasattr(self, "_save_btn"):
+            return
+        has_chart = bool(self._selected_template) and bool(self._get_selected_des())
+        for b in (self._save_btn, self._save_as_btn, self._dash_btn, self._preview_btn):
+            b.setEnabled(has_chart)
+        try:
+            from config.chart_library import load_charts
+            self._open_btn.setEnabled(bool(load_charts()))
+        except Exception:
+            self._open_btn.setEnabled(True)
 
     # =========================================================================
     # Metadata
     # =========================================================================
+
+    def set_in_use(self, uids) -> None:
+        """Restrict metrics & dimensions to this set of curated UIDs (empty = show all).
+
+        Called by app_window after connect and whenever the Metadata Library's selection
+        changes (REQ-META-EDIT-04)."""
+        self._in_use = set(uids or [])
+        # Refresh the pickers if metadata is already loaded.
+        if self._programs or self._agg_des or self._agg_indicators:
+            self._refresh_metrics_display()
+            self._refresh_dimensions_display()
 
     def load_metadata(self, meta: dict):
         self._metadata = meta
@@ -1145,7 +1425,7 @@ class ChartEditorPanel(QWidget):
             sid   = de.get("stage", {}).get("id", "")
             sname = de.get("stage", {}).get("displayName", sid)
             if pid not in prog_map:
-                prog_map[pid] = {"id": pid, "displayName": pname, "stages": {}}
+                prog_map[pid] = {"id": pid, "displayName": pname, "stages": {}, "teas": []}
             sm = prog_map[pid]["stages"]
             if sid not in sm:
                 sm[sid] = {"id": sid, "displayName": sname, "des": []}
@@ -1163,11 +1443,67 @@ class ChartEditorPanel(QWidget):
                 "stage_uid":  sid,
                 "stage_name": sname,
                 "options":    options,
+                "kind":       "DE",
+            })
+
+        # Program (tracked-entity) attributes — gender, age, etc. Available as
+        # metrics / dimensions / filters alongside stage data elements (program-level,
+        # not tied to a stage). Numeric valueType → tracker_numeric, else categorical.
+        _NUM_VT = {"INTEGER", "NUMBER", "INTEGER_POSITIVE", "INTEGER_NEGATIVE",
+                   "INTEGER_ZERO_OR_POSITIVE", "PERCENTAGE", "UNIT_INTERVAL"}
+        for tea in meta.get("tracked_entity_attributes", []):
+            pid   = tea.get("program", {}).get("id", "")
+            if not pid:
+                continue
+            pname = tea.get("program", {}).get("displayName", pid)
+            prog_map.setdefault(pid, {"id": pid, "displayName": pname, "stages": {}, "teas": []})
+            prog_map[pid].setdefault("teas", [])
+            os_data = tea.get("optionSet") or {}
+            options = [
+                {"code": o.get("code", ""), "name": o.get("displayName", o.get("code", ""))}
+                for o in os_data.get("options", [])
+            ]
+            typ = ("tracker_option" if os_data
+                   else "tracker_numeric" if tea.get("valueType") in _NUM_VT
+                   else "tracker_option")
+            prog_map[pid]["teas"].append({
+                "uid":        tea["id"],
+                "name":       tea.get("displayName", tea["id"]),
+                "type":       typ,
+                "prog_uid":   pid,
+                "prog_name":  pname,
+                "stage_uid":  "",        # TEAs are program-level (no stage)
+                "is_tea":     True,      # → analytics dimension uses the bare uid
+                "options":    options,
+                "kind":       "PA",
+            })
+
+        # Program indicators — program-level metrics. Queried as dx in analytics.json
+        # (DHIS2 treats a PI uid as a dx item), so type "indicator" reuses the existing
+        # aggregate render path in every plugin. Metric-only (no option set).
+        for pi in meta.get("program_indicators", []):
+            pid = pi.get("program", {}).get("id", "")
+            if not pid:
+                continue
+            pname = pi.get("program", {}).get("displayName", pid)
+            prog_map.setdefault(pid, {"id": pid, "displayName": pname,
+                                      "stages": {}, "teas": [], "pis": []})
+            prog_map[pid].setdefault("pis", [])
+            prog_map[pid]["pis"].append({
+                "uid":        pi["id"],
+                "name":       pi.get("displayName", pi["id"]),
+                "type":       "indicator",   # → analytics.json dx (works for PI)
+                "prog_uid":   pid,
+                "prog_name":  pname,
+                "stage_uid":  "",
+                "is_pi":      True,
+                "kind":       "PI",
             })
 
         self._programs = sorted(
             [{"id": p["id"], "displayName": p["displayName"],
-              "stages": list(p["stages"].values())}
+              "stages": list(p["stages"].values()), "teas": p.get("teas", []),
+              "pis": p.get("pis", [])}
              for p in prog_map.values()],
             key=lambda x: x["displayName"].lower())
 
@@ -1176,6 +1512,17 @@ class ChartEditorPanel(QWidget):
               "type": "aggregate", "prog_uid": "", "stage_uid": ""}
              for d in meta.get("data_elements", [])],
             key=lambda x: x["name"].lower())
+
+        # Aggregate indicators: if the connect-time metadata already includes them (aggregate
+        # scope), use them for free. Otherwise leave empty and fetch on demand when the user
+        # ticks "Indicators" (see _ensure_indicators_loaded) — avoids loading them needlessly.
+        self._agg_indicators = sorted(
+            [{"uid": i["id"], "name": i.get("displayName", i["id"]),
+              "type": "indicator", "prog_uid": "", "stage_uid": "", "kind": "I"}
+             for i in meta.get("indicators", [])],
+            key=lambda x: x["name"].lower())
+        self._indicators_loaded = bool(self._agg_indicators)
+        self._indicators_loading = False
 
         self._prog_menu.blockSignals(True)
         self._prog_menu.clear()
@@ -1194,15 +1541,79 @@ class ChartEditorPanel(QWidget):
     # Source logic
     # =========================================================================
 
+    def _on_kind_filter_change(self, *_):
+        """DE/PA/PI filter toggled — re-list and refresh pickers."""
+        self._refresh_metrics_display()
+        self._refresh_dimensions_display()
+
+    def _ensure_indicators_loaded(self):
+        """Fetch indicators on demand the first time the user ticks the 'Indicators' source.
+
+        Skipped entirely when they were already in the connect-time metadata, when offline
+        (fixture mode), or while a fetch is already in flight — so we never load needlessly.
+        """
+        from ui.debug_logger import log
+        if not (hasattr(self, "_src_ind_cb") and self._src_ind_cb.isChecked()):
+            return
+        if self._indicators_loaded or self._indicators_loading:
+            log("indicators", f"skip: loaded={self._indicators_loaded} "
+                              f"loading={self._indicators_loading} have={len(self._agg_indicators)}")
+            return
+        client = getattr(self, "_dhis2_client", None)
+        if client is None:
+            # Fixture/offline — can't fetch. Tell the user why the list is empty.
+            log("indicators", "no client (offline/fixture) — cannot fetch")
+            self._metrics_picker.set_placeholder("⚠ Connect to DHIS2 to load indicators")
+            return
+        self._indicators_loading = True
+        # Fetch the full set once (then filter locally + cap rendering) — fetching by the
+        # current search term would cache only a subset and confuse later searches.
+        log("indicators", "fetch start (full set)…")
+        self._metrics_picker.set_placeholder("⏳ Loading indicators…")
+        threading.Thread(target=self._load_indicators_worker,
+                         args=(client, ""), daemon=True).start()
+
+    def _load_indicators_worker(self, client, name: str):
+        from ui.debug_logger import log
+        try:
+            from dhis2.metadata import fetch_indicators
+            cfg = {"indicator_name": name} if name else {}
+            rows = fetch_indicators(client, cfg)
+            log("indicators", f"fetch ok: {len(rows)} rows")
+            inds = [{"uid": r["id"], "name": r.get("displayName", r["id"]),
+                     "type": "indicator", "prog_uid": "", "stage_uid": "", "kind": "I"}
+                    for r in rows]
+            self._call_main.emit(lambda: self._on_indicators_loaded(inds, None))
+        except Exception as exc:
+            log("indicators", f"fetch ERROR: {exc!r}")
+            self._call_main.emit(lambda e=exc: self._on_indicators_loaded([], str(e)))
+
+    def _on_indicators_loaded(self, inds: list, err):
+        from ui.debug_logger import log
+        self._indicators_loading = False
+        self._metrics_picker.set_placeholder(None)
+        if err:
+            log("indicators", f"load failed: {err}")
+            QMessageBox.warning(self, "Indicators", f"Could not load indicators:\n{err}")
+            return
+        self._indicators_loaded = True
+        self._agg_indicators = sorted(inds, key=lambda x: x["name"].lower())
+        log("indicators", f"loaded {len(self._agg_indicators)}; "
+                          f"ind_src={self._src_ind_cb.isChecked()} refreshing")
+        self._refresh_metrics_display()
+        self._refresh_dimensions_display()
+
     def _on_src_check(self):
         prog = self._src_prog_cb.isChecked()
         agg  = self._src_agg_cb.isChecked()
+        ind  = self._src_ind_cb.isChecked() if hasattr(self, "_src_ind_cb") else False
         self._prog_menu.setVisible(prog)
         self._stage_menu.setVisible(prog)
-        self._agg_search_entry.setVisible(agg)
-        if not agg:
-            self._agg_search_entry.clear()
-        if not prog and not agg:
+        if hasattr(self, "_kind_row"):
+            self._kind_row.setVisible(prog)          # kind filter is Program-only (DE/PA/PI)
+        if ind:
+            self._ensure_indicators_loaded()         # fetch on demand the first time
+        if not prog and not agg and not ind:
             self._clear_de_list()
         else:
             self._refresh_metrics_display()
@@ -1234,7 +1645,10 @@ class ChartEditorPanel(QWidget):
     def _refresh_de_list(self):
         """Update _current_de_items from current source selection. No widget creation."""
         for_types = self._selected_template["for_types"] if self._selected_template else \
-                    {"tracker_option", "tracker_numeric", "aggregate"}
+                    {"tracker_option", "tracker_numeric", "aggregate", "indicator"}
+        # DE/PA/PI kind filter (default: all kinds shown if checkboxes absent).
+        kinds = {k for k, cb in getattr(self, "_kind_cbs", {}).items() if cb.isChecked()} \
+                or {"DE", "PA", "PI"}
         items: list[dict] = []
         if self._src_prog_cb.isChecked():
             prog = getattr(self, "_current_prog", None)
@@ -1246,11 +1660,26 @@ class ChartEditorPanel(QWidget):
                     stage = next((s for s in prog["stages"]
                                   if s["displayName"] == sname), None)
                     prog_des = stage["des"] if stage else []
-                items.extend(de for de in prog_des if de["type"] in for_types)
+                if "DE" in kinds:
+                    items.extend(de for de in prog_des if de["type"] in for_types)
+                # Program attributes (PA / TEA) — gender, age… (program-level)
+                if "PA" in kinds:
+                    items.extend(t for t in prog.get("teas", []) if t["type"] in for_types)
+                # Program indicators (program-level, queried as dx)
+                if "PI" in kinds:
+                    items.extend(p for p in prog.get("pis", []) if p["type"] in for_types)
+        # Aggregate DEs + Indicators — each picker has its own search box, so we pass the
+        # full pool here and let the picker filter (no second source-level search).
         if self._src_agg_cb.isChecked():
-            q = self._agg_search_entry.text().strip().lower()
-            items.extend(de for de in self._agg_des
-                         if "aggregate" in for_types and (not q or q in de["name"].lower()))
+            items.extend(de for de in self._agg_des if "aggregate" in for_types)
+        # Indicators — standalone dx source (independent of datasets), queried as dx.
+        if hasattr(self, "_src_ind_cb") and self._src_ind_cb.isChecked():
+            items.extend(ind for ind in self._agg_indicators if "indicator" in for_types)
+        # Metrics/dimensions come ONLY from the Metadata Library's in-use list. An empty
+        # selection means "not configured yet" → offer nothing (the pickers show a prompt
+        # to open the Metadata Library — see _refresh_metrics_display).
+        in_use = getattr(self, "_in_use", set())
+        items = [it for it in items if it.get("uid") in in_use]
         self._current_de_items = items
 
     # =========================================================================
@@ -1259,43 +1688,43 @@ class ChartEditorPanel(QWidget):
 
     def _on_chart_type_click(self, tmpl: dict):
         self._selected_template = tmpl
-        self._min_des = tmpl.get("min_sources", 1)
-        self._max_des = tmpl.get("max_sources", 1 if not tmpl.get("multi") else 3)
-
         plugin = tmpl.get("plugin")
         self._selected_plugin = plugin
 
-        if self._min_des == self._max_des:
-            lbl = str(self._max_des)
+        # Derive max/min from plugin MetricControls (authoritative source)
+        if plugin and getattr(plugin, "metrics", []):
+            self._max_des = max(mc.max_count for mc in plugin.metrics)
+            self._min_des = sum(1 for mc in plugin.metrics if getattr(mc, "required", True))
         else:
-            lbl = f"{self._min_des}–{self._max_des}"
-        self._metrics_section_lbl.setText(f"3. METRICS  (tick {lbl})")
+            self._min_des = tmpl.get("min_sources", 1)
+            self._max_des = tmpl.get("max_sources", 1 if not tmpl.get("multi") else 3)
+
         self._chart_info_lbl.setText(tmpl.get("description", ""))
         self._chart_info_lbl.setStyleSheet("font-size:9px; color:#5a7a9a; background:transparent;")
 
         prog_ok = bool({"tracker_option", "tracker_numeric"} & tmpl["for_types"])
         agg_ok  = "aggregate" in tmpl["for_types"]
+        ind_ok  = "indicator" in tmpl["for_types"]
         self._src_prog_cb.setEnabled(prog_ok)
         self._src_agg_cb.setEnabled(agg_ok)
+        self._src_ind_cb.setEnabled(ind_ok)
         if not prog_ok:
             self._src_prog_cb.setChecked(False)
         if not agg_ok:
             self._src_agg_cb.setChecked(False)
-        if not self._src_prog_cb.isChecked() and not self._src_agg_cb.isChecked():
+        if not ind_ok:
+            self._src_ind_cb.setChecked(False)
+        if not (self._src_prog_cb.isChecked() or self._src_agg_cb.isChecked()
+                or self._src_ind_cb.isChecked()):
             if prog_ok:
                 self._src_prog_cb.setChecked(True)
             elif agg_ok:
                 self._src_agg_cb.setChecked(True)
+            elif ind_ok:
+                self._src_ind_cb.setChecked(True)
 
-        # Enforce DE max
-        sel = self._get_selected_des()
-        if len(sel) > self._max_des:
-            count = 0
-            for de, cb, *_ in self._de_checkboxes:
-                if cb.isChecked():
-                    count += 1
-                    if count > self._max_des:
-                        cb.setChecked(False)
+        # Update picker max — picker preserves compatible selections automatically
+        self._metrics_picker.set_max_count(self._max_des)
 
         # Highlight tiles
         for tid, tile in self._chart_tiles.items():
@@ -1306,66 +1735,30 @@ class ChartEditorPanel(QWidget):
         self._rebuild_chart_options()
         self._refresh_metrics_display()
         self._refresh_dimensions_display()
+        self._update_metrics_agg_visibility()
+        self._update_action_buttons()
         self._auto_preview()
 
     # =========================================================================
     # Metrics display
     # =========================================================================
 
+    _NO_METADATA_HINT = ("⚠ No metadata in use — open “Metadata Library” "
+                         "(sidebar) and move data elements into the In-use list.")
+
     def _refresh_metrics_display(self, *_):
-        """Rebuild metrics scroll content based on current plugin + available DEs."""
+        """Update metrics picker with current available DEs."""
         self._refresh_de_list()
-
-        # Clear inner widget
-        while self._metrics_inner_lay.count():
-            item = self._metrics_inner_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._metric_rows = []
-
-        if not self._current_de_items:
-            lbl = QLabel("Select source first")
-            lbl.setStyleSheet("color:#8aa3b8; font-size:10px;")
-            lbl.setAlignment(Qt.AlignCenter)
-            self._metrics_inner_lay.addWidget(lbl)
-            self._metrics_inner_lay.addStretch()
-            return
-
-        existing_checked = {de["uid"] for de, cb, *_ in self._de_checkboxes if cb.isChecked()}
-        self._de_checkboxes = []
-
-        for de in self._current_de_items:
-            checked = de["uid"] in existing_checked
-
-            row_w = QWidget()
-            row_w.setStyleSheet("background:white;")
-            row_lay = QHBoxLayout(row_w)
-            row_lay.setContentsMargins(4, 1, 4, 1)
-            row_lay.setSpacing(4)
-
-            cb = QCheckBox(de["name"])
-            cb.setChecked(checked)
-            cb.setStyleSheet("font-size:10px;")
-            cb.stateChanged.connect(self._on_de_check)
-            row_lay.addWidget(cb, stretch=1)
-
-            de_type = de.get("type", "")
-            needs_agg = de_type in ("tracker_numeric", "aggregate", "indicator")
-            agg_combo: QComboBox | None = None
-
-            if needs_agg:
-                agg_combo = QComboBox()
-                agg_combo.addItems(["SUM", "COUNT", "AVG", "MIN", "MAX"])
-                agg_combo.setFixedWidth(80)
-                agg_combo.setFixedHeight(22)
-                agg_combo.currentTextChanged.connect(lambda _: self._on_de_check())
-                row_lay.addWidget(agg_combo)
-
-            self._metrics_inner_lay.addWidget(row_w)
-            self._de_checkboxes.append((de, cb, agg_combo))
-            self._metric_rows.append((de, cb, agg_combo))
-
-        self._metrics_inner_lay.addStretch()
+        self._metrics_picker.set_items(self._current_de_items)
+        # Nothing curated yet → tell the user to configure the Metadata Library.
+        self._metrics_picker.set_placeholder(
+            self._NO_METADATA_HINT if not self._in_use else None)
+        # Update the section label to reflect max
+        if self._min_des == self._max_des:
+            lbl = str(self._max_des)
+        else:
+            lbl = f"{self._min_des}–{self._max_des}"
+        self._metrics_section_lbl.setText(f"3. METRICS  (SELECT {lbl})")
 
     # =========================================================================
     # Dimensions display
@@ -1381,13 +1774,67 @@ class ChartEditorPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+        has_color_scheme = False
         if plugin_cls and getattr(plugin_cls, "options", []):
             self._select_controls_frame.setVisible(True)
             old_vals = {k: v.get() for k, v in self._select_vars.items()}
             self._select_vars = {}
+            old_text = {k: v.toPlainText() for k, v in self._textarea_vars.items()}
+            self._textarea_vars = {}
+            self._html_highlighter = None
             for sc in plugin_cls.options:
-                prev = old_vals.get(sc.id, sc.default)
-                val  = prev if prev in sc.choices else sc.default
+                # Large free-form editor (e.g. Custom HTML template): full-width, tall.
+                if isinstance(sc, TextAreaControl):
+                    box = QWidget()
+                    box.setStyleSheet("background:transparent;")
+                    box_lay = QVBoxLayout(box)
+                    box_lay.setContentsMargins(0, 2, 0, 2)
+                    box_lay.setSpacing(2)
+                    box_lay.addWidget(QLabel(sc.label + ":"))
+                    editor = QPlainTextEdit()
+                    editor.setPlainText(old_text.get(sc.id, sc.default))
+                    if sc.placeholder:
+                        editor.setPlaceholderText(sc.placeholder)
+                    editor.setMinimumHeight(sc.height)
+                    if sc.monospace:
+                        editor.setStyleSheet(
+                            "QPlainTextEdit{font-family:Consolas,'Courier New',monospace;"
+                            "font-size:11px;background:#ffffff;color:#1e2d3d;"
+                            "border:1px solid #c0cdd8;border-radius:4px;}")
+                    editor.textChanged.connect(self._schedule_preview_refresh)
+                    box_lay.addWidget(editor)
+                    self._textarea_vars[sc.id] = editor
+                    # HTML syntax highlighting + {{metric/dimension}} variable highlighting,
+                    # plus an "AI generate from image" button.
+                    if sc.id == "html":
+                        from ui.html_highlighter import HtmlTemplateHighlighter
+                        self._html_highlighter = HtmlTemplateHighlighter(
+                            editor.document(), self._html_known_vars())
+                        self._html_ai_btn = QPushButton("🤖 Generate from image…")
+                        self._html_ai_btn.setStyleSheet(
+                            "QPushButton{font-size:11px;padding:4px 10px;border:1px solid #1a6fa8;"
+                            "border-radius:4px;background:#eaf3fa;color:#1a6fa8;}"
+                            "QPushButton:hover{background:#d6e9f7;}"
+                            "QPushButton:disabled{color:#9bb3c4;border-color:#c5d6e2;background:#f2f6f9;}")
+                        self._html_ai_btn.setToolTip(
+                            "Upload an image (table/mock-up) → Claude generates matching HTML")
+                        self._html_ai_btn.clicked.connect(self._on_html_from_image)
+                        self._html_lib_btn = QPushButton("📁 Templates")
+                        self._html_lib_btn.setStyleSheet(
+                            "QPushButton{font-size:11px;padding:4px 10px;border:1px solid #5a7a9a;"
+                            "border-radius:4px;background:#f2f6f9;color:#5a7a9a;}"
+                            "QPushButton:hover{background:#e3ecf2;}")
+                        self._html_lib_btn.setToolTip(
+                            "Browse saved templates and load one without re-generating")
+                        self._html_lib_btn.clicked.connect(self._on_open_html_gallery)
+                        btn_row = QHBoxLayout()
+                        btn_row.setContentsMargins(0, 0, 0, 0)
+                        btn_row.addWidget(self._html_ai_btn)
+                        btn_row.addWidget(self._html_lib_btn)
+                        btn_row.addStretch(1)
+                        box_lay.addLayout(btn_row)
+                    self._select_controls_lay.addWidget(box)
+                    continue
 
                 row_w = QWidget()
                 row_w.setStyleSheet("background:transparent;")
@@ -1396,19 +1843,42 @@ class ChartEditorPanel(QWidget):
                 row_lay.setSpacing(6)
 
                 lbl = QLabel(sc.label + ":")
-                lbl.setStyleSheet("font-size:9px; color:#5a7a9a; background:transparent;")
+                lbl.setStyleSheet("font-size:9px; color:#5a7a9a; background:transparent; min-width:72px;")
                 row_lay.addWidget(lbl)
 
-                seg = SegmentedButton(list(sc.choices), default=val)
-                seg.changed.connect(self._on_select_control_change)
-                row_lay.addWidget(seg)
-                row_lay.addStretch()
+                if isinstance(sc, CheckboxGroupControl):
+                    # Multi-select: any subset of choices can be active
+                    default_val = ",".join(sc.default)
+                    prev = old_vals.get(sc.id, default_val)
+                    widget = _MultiToggleWidget(list(sc.choices), parent=row_w)
+                    widget.set(prev)
+                    widget.changed.connect(self._on_select_control_change)
+                    row_lay.addWidget(widget)
+                else:
+                    # Single-select (SelectControl) — with a custom-value affordance so
+                    # the user can type/pick any value beyond the presets (REQ-UI-OPT-01).
+                    prev = old_vals.get(sc.id, sc.default)
+                    val  = prev if prev else sc.default
+                    widget = SegmentedButton(list(sc.choices), default=val,
+                                             custom=self._custom_kind(sc.id))
+                    widget.changed.connect(self._on_select_control_change)
+                    row_lay.addWidget(widget)
+                    row_lay.addStretch()
 
-                self._select_vars[sc.id] = seg
+                self._select_vars[sc.id] = widget
                 self._select_controls_lay.addWidget(row_w)
+                if sc.id == "color_scheme":
+                    has_color_scheme = True
         else:
             self._select_controls_frame.setVisible(False)
             self._select_vars = {}
+            self._textarea_vars = {}
+
+        # Hide plain color swatches when plugin provides its own color_scheme control
+        if hasattr(self, "_color_section_lbl"):
+            self._color_section_lbl.setVisible(not has_color_scheme)
+        if hasattr(self, "_color_swatch_row"):
+            self._color_swatch_row.setVisible(not has_color_scheme)
 
         # ── Time grain ──────────────────────────────────────────────────────────
         has_time_grain = False
@@ -1423,7 +1893,11 @@ class ChartEditorPanel(QWidget):
         # ── Dimension ───────────────────────────────────────────────────────────
         dim_hint = ""
         if plugin_cls and plugin_cls.dimensions:
-            dim_hint = plugin_cls.dimensions[0].hint
+            _dc = plugin_cls.dimensions[0]
+            dim_hint = _dc.hint
+            # Tables allow multiple dimensions with aliases (like metrics); others stay single.
+            self._dim_picker.set_max_count(getattr(_dc, "max_count", 1))
+            self._dim_picker.set_show_alias(getattr(_dc, "show_alias", False))
         elif self._selected_template:
             tid = self._selected_template.get("id", "")
             if "stacked" in tid:
@@ -1433,23 +1907,20 @@ class ChartEditorPanel(QWidget):
             elif "line" in tid:
                 dim_hint = "Split into multiple lines by option value"
 
-        current_dim = self._dimension_menu.currentText()
-        dim_names = ["—"] + [d["name"] for d in self._current_de_items]
-        self._dimension_menu.blockSignals(True)
-        self._dimension_menu.clear()
-        self._dimension_menu.addItems(dim_names)
-        if current_dim in dim_names:
-            self._dimension_menu.setCurrentText(current_dim)
-        else:
-            self._dimension_menu.setCurrentText("—")
-        self._dimension_menu.blockSignals(False)
-
+        self._dim_picker.set_items(self._current_de_items)
+        self._dim_picker.set_placeholder(
+            self._NO_METADATA_HINT if not self._in_use else None)
         self._dim_hint_lbl.setText(dim_hint)
-        self._dimension_row.setVisible(bool(self._selected_template))
+        # Only show the split-by picker for chart types that actually support a dimension
+        # (e.g. maps declare none, so it must stay hidden — it was being ignored before).
+        plugin = self._selected_plugin
+        has_dims = bool(plugin and getattr(plugin, "dimensions", []))
+        self._dim_picker_row.setVisible(bool(self._selected_template) and has_dims)
 
         # ── Refresh filter DE dropdowns ─────────────────────────────────────────
-        de_names = ["—"] + [d["name"] for d in self._current_de_items]
-        de_map   = {d["name"]: d for d in self._current_de_items}
+        from ui.metadata_display import plain_label
+        de_names = ["—"] + [plain_label(d) for d in self._current_de_items]
+        de_map   = {plain_label(d): d for d in self._current_de_items}
         for r in self._filter_rows:
             cur = r["de_menu"].currentText()
             r["de_menu"].blockSignals(True)
@@ -1465,8 +1936,9 @@ class ChartEditorPanel(QWidget):
     # =========================================================================
 
     def _add_filter_row(self):
-        de_names = ["—"] + [d["name"] for d in self._current_de_items]
-        de_map   = {d["name"]: d for d in self._current_de_items}
+        from ui.metadata_display import plain_label
+        de_names = ["—"] + [plain_label(d) for d in self._current_de_items]
+        de_map   = {plain_label(d): d for d in self._current_de_items}
 
         row_w = QWidget()
         row_w.setStyleSheet("background:transparent;")
@@ -1474,33 +1946,58 @@ class ChartEditorPanel(QWidget):
         row_lay.setContentsMargins(0, 1, 0, 1)
         row_lay.setSpacing(3)
 
+        _RH = 26   # uniform row height so all controls on the filter row line up
+
+        # Searchable field dropdown — type to filter long DE/PA lists.
         de_menu = QComboBox()
         de_menu.addItems(de_names)
-        de_menu.setFixedHeight(22)
-        de_menu.setFixedWidth(110)
+        de_menu.setEditable(True)
+        de_menu.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        de_menu.lineEdit().setPlaceholderText("Search field…")
+        comp = de_menu.completer()
+        comp.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        comp.setFilterMode(Qt.MatchFlag.MatchContains)
+        de_menu.setCurrentIndex(0)
+        de_menu.setFixedHeight(_RH)
+        de_menu.setFixedWidth(150)
+        _style_combo(de_menu)
+        from ui.metadata_display import TypePrefixDelegate
+        de_menu.view().setItemDelegate(TypePrefixDelegate(de_menu))
         row_lay.addWidget(de_menu)
 
         op_menu = QComboBox()
         op_menu.addItems(self._FILTER_OPS)
-        op_menu.setFixedHeight(22)
+        op_menu.setFixedHeight(_RH)
         op_menu.setFixedWidth(70)
+        _style_combo(op_menu)
         row_lay.addWidget(op_menu)
 
+        # Value: free text by default; an option dropdown when the field has an option set.
         val_entry = QLineEdit()
-        val_entry.setFixedHeight(22)
+        val_entry.setFixedHeight(_RH)
         val_entry.setPlaceholderText("value")
         row_lay.addWidget(val_entry, stretch=1)
+
+        val_combo = QComboBox()
+        val_combo.setFixedHeight(_RH)
+        _style_combo(val_combo)
+        val_combo.setVisible(False)
+        row_lay.addWidget(val_combo, stretch=1)
 
         row_data = dict(
             frame=row_w,
             de_menu=de_menu,
             op_menu=op_menu,
             val_entry=val_entry,
+            val_combo=val_combo,
             de_map=de_map,
         )
+        de_menu.currentTextChanged.connect(
+            lambda _t, rd=row_data: self._on_filter_de_changed(rd))
 
         rm_btn = QPushButton("✕")
-        rm_btn.setFixedSize(22, 22)
+        rm_btn.setFixedSize(_RH, _RH)
         rm_btn.setStyleSheet(
             "QPushButton { background:#f0f4f8; border:1px solid #c0cdd8; "
             "border-radius:3px; color:#8aa3b8; font-size:10px; }"
@@ -1512,125 +2009,92 @@ class ChartEditorPanel(QWidget):
         self._filter_rows.append(row_data)
         self._filter_rows_lay.addWidget(row_w)
 
+    def _on_filter_de_changed(self, rd: dict):
+        """When the filter field is an option-set DE/PA, offer its captured option
+        values as a dropdown instead of free text (REQ: pick from value set)."""
+        de = rd["de_map"].get(rd["de_menu"].currentText(), {})
+        opts = de.get("options") or []
+        vc = rd["val_combo"]
+        rd["use_combo"] = bool(opts)
+        if opts:
+            vc.blockSignals(True)
+            vc.clear()
+            vc.addItem("—", "")
+            for o in opts:
+                vc.addItem(o.get("name", o.get("code", "")), o.get("code", ""))
+            vc.blockSignals(False)
+            vc.setVisible(True)
+            rd["val_entry"].setVisible(False)
+        else:
+            vc.setVisible(False)
+            rd["val_entry"].setVisible(True)
+
+    def _filter_value(self, rd: dict) -> str:
+        """Current filter value from whichever value widget is active (option set → code)."""
+        if rd.get("use_combo") and rd.get("val_combo") is not None:
+            return (rd["val_combo"].currentData() or "").strip()
+        return rd["val_entry"].text().strip()
+
     def _remove_filter_row(self, row_data: dict):
         row_data["frame"].setParent(None)
         row_data["frame"].deleteLater()
         self._filter_rows = [r for r in self._filter_rows if r is not row_data]
 
+    @staticmethod
+    def _custom_kind(ident: str):
+        """Custom input ONLY where a free value is genuinely useful (colour / size).
+        Enum-style controls (mode, base map, x-axis…) return None → no custom affordance."""
+        n = (ident or "").lower()
+        if ("color" in n or "colour" in n) and "scheme" not in n:
+            return "color"   # single-colour controls (point_color, value_color, …)
+        if any(k in n for k in ("size", "scale", "width", "height", "radius",
+                                "rotation", "row_limit", "thickness")):
+            return "number"
+        return None
+
     def _on_select_control_change(self, *_):
+        self._update_metrics_agg_visibility()
         self._schedule_preview_refresh()
+
+    def _update_metrics_agg_visibility(self):
+        """Hide the per-metric aggregation dropdown for a raw Data Table (no aggregation)."""
+        tid = self._selected_template.get("id", "") if self._selected_template else ""
+        mode_seg = self._select_vars.get("mode")
+        is_raw_table = (tid == "table_view" and mode_seg is not None
+                        and mode_seg.get() == "Raw")
+        self._metrics_picker.set_show_agg(not is_raw_table)
 
     # =========================================================================
     # DE list helpers
     # =========================================================================
 
     def _clear_de_list(self, msg: str = "Select chart type first"):
-        while self._metrics_inner_lay.count():
-            item = self._metrics_inner_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._de_checkboxes = []
-        self._metric_rows = []
         self._current_de_items = []
-        lbl = QLabel(msg)
-        lbl.setStyleSheet("color:#8aa3b8; font-size:10px;")
-        lbl.setAlignment(Qt.AlignCenter)
-        self._metrics_inner_lay.addWidget(lbl)
-        self._metrics_inner_lay.addStretch()
-        self._sel_lbl.setText("")
+        self._metrics_picker.set_items([])
 
     def _populate_de_list(self, items: list[dict],
                           preserve_checked: set[str] | None = None):
         self._current_de_items = items
-        checked = preserve_checked or {de["uid"] for de, cb, *_ in self._de_checkboxes
-                                       if cb.isChecked()}
-        while self._metrics_inner_lay.count():
-            item = self._metrics_inner_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._de_checkboxes = []
-        self._metric_rows = []
-
-        if not items:
-            lbl = QLabel("No results")
-            lbl.setStyleSheet("color:#8aa3b8; font-size:10px;")
-            lbl.setAlignment(Qt.AlignCenter)
-            self._metrics_inner_lay.addWidget(lbl)
-            self._metrics_inner_lay.addStretch()
-            return
-
-        for de in items:
-            row_w = QWidget()
-            row_w.setStyleSheet("background:white;")
-            row_lay = QHBoxLayout(row_w)
-            row_lay.setContentsMargins(4, 1, 4, 1)
-            row_lay.setSpacing(4)
-
-            cb = QCheckBox(de["name"])
-            cb.setChecked(de["uid"] in checked)
-            cb.setStyleSheet("font-size:10px;")
-            cb.stateChanged.connect(self._on_de_check)
-            row_lay.addWidget(cb, stretch=1)
-
-            de_type = de.get("type", "")
-            needs_agg = de_type in ("tracker_numeric", "aggregate", "indicator")
-            agg_combo: QComboBox | None = None
-            if needs_agg:
-                agg_combo = QComboBox()
-                agg_combo.addItems(["SUM", "COUNT", "AVG", "MIN", "MAX"])
-                agg_combo.setFixedWidth(80)
-                agg_combo.setFixedHeight(22)
-                agg_combo.currentTextChanged.connect(lambda _: self._on_de_check())
-                row_lay.addWidget(agg_combo)
-
-            self._metrics_inner_lay.addWidget(row_w)
-            self._de_checkboxes.append((de, cb, agg_combo))
-            self._metric_rows.append((de, cb, agg_combo))
-
-        self._metrics_inner_lay.addStretch()
+        self._metrics_picker.set_items(items)
 
     def _on_de_check(self):
-        if len(self._get_selected_des()) > self._max_des:
-            count = 0
-            for de, cb, *_ in self._de_checkboxes:
-                if cb.isChecked():
-                    count += 1
-                    if count > self._max_des:
-                        cb.blockSignals(True)
-                        cb.setChecked(False)
-                        cb.blockSignals(False)
-
-        # Collect selected metrics with agg type
-        self._selected_metrics = []
-        for de, cb, agg_combo in self._metric_rows:
-            if cb.isChecked():
-                agg = agg_combo.currentText() if agg_combo is not None else "COUNT"
-                self._selected_metrics.append({
-                    "uid":  de["uid"],
-                    "name": de["name"],
-                    "type": de["type"],
-                    "agg":  agg,
-                })
-
         sel = self._get_selected_des()
-        if not sel:
-            self._sel_lbl.setText("")
-            self._sel_lbl.setStyleSheet(
-                "color:#1565c0; font-size:10px; background:transparent; padding:2px 10px;"
-            )
-        else:
-            text = "  ✓ " + " + ".join(d["name"][:22] for d in sel) + "  "
-            self._sel_lbl.setText(text)
-            self._sel_lbl.setStyleSheet(
-                "color:#1565c0; font-size:10px; background:#e3f2fd; "
-                "padding:2px 10px; border-radius:3px;"
-            )
-
+        # Sync _selected_metrics (used in _build_config); include options for optionSet DEs
+        self._selected_metrics = [
+            {"uid": d["uid"], "name": d.get("name", d["uid"]), "type": d.get("type", ""),
+             "agg": d.get("agg", "SUM"),
+             "alias": d.get("alias", ""),
+             "prog_uid": d.get("prog_uid", ""), "stage_uid": d.get("stage_uid", ""),
+             "options": d.get("options", [])}
+            for d in sel
+        ]
+        self._update_action_buttons()
+        self._update_html_known_vars()   # recolor {{metric}} vars in the Custom HTML editor
         if self._mode_fixed_rb.isChecked() and len(sel) >= self._min_des:
             self._auto_preview()
 
     def _get_selected_des(self) -> list[dict]:
-        return [de for de, cb, *_ in self._de_checkboxes if cb.isChecked()]
+        return self._metrics_picker.get_selected_des()
 
     # =========================================================================
     # Dynamic Chart Options
@@ -1692,7 +2156,8 @@ class ChartEditorPanel(QWidget):
 
             if opt["type"] == "segment":
                 default_val = opt.get("default", opt["values"][0])
-                seg = SegmentedButton(opt["values"], default=default_val)
+                seg = SegmentedButton(opt["values"], default=default_val,
+                                      custom=self._custom_kind(opt.get("id", opt.get("label", ""))))
                 seg.changed.connect(lambda _: self._apply_chart_options())
                 self._option_vars[opt["id"]] = seg
                 row_lay.addWidget(seg)
@@ -1734,9 +2199,20 @@ class ChartEditorPanel(QWidget):
 
     def _on_color_select(self, color: str):
         self._selected_color = color
+        # If the colour isn't a preset, show it on the custom swatch so it stays visible.
+        if hasattr(self, "_custom_color_swatch") and \
+           color not in [c for c, _ in COLOR_PRESETS]:
+            self._custom_color_swatch._color = color
+            self._custom_color_swatch.setVisible(True)
         for swatch in self._color_swatches:
             swatch._set_selected(swatch._color == color)
         self._schedule_preview_refresh()
+
+    def _on_pick_custom_color(self):
+        col = QColorDialog.getColor()
+        if not col.isValid():
+            return
+        self._on_color_select(col.name())
 
     def _on_mode_change(self):
         is_ai = self._mode_ai_rb.isChecked()
@@ -1750,8 +2226,29 @@ class ChartEditorPanel(QWidget):
         self._schedule_preview_refresh()
 
     def _schedule_preview_refresh(self):
+        self._update_html_known_vars()
         self._preview_timer.stop()
         self._preview_timer.start(400)
+
+    def _html_known_vars(self) -> set[str]:
+        """Column names that will exist in window.__chartData = metric + dimension display
+        names (alias or original) + the Raw-mode standard columns."""
+        names: set[str] = {"Event date", "Org unit"}
+        try:
+            picks = self._metrics_picker.get_selected_des() + self._dim_picker.get_selected_des()
+        except Exception:
+            picks = []
+        for d in picks:
+            label = (d.get("alias") or "").strip() or d.get("name", "")
+            if label:
+                names.add(label)
+        return names
+
+    def _update_html_known_vars(self):
+        """Refresh the HTML editor's {{variable}} highlighting against the current columns."""
+        hl = getattr(self, "_html_highlighter", None)
+        if hl is not None:
+            hl.set_known_vars(self._html_known_vars())
 
     def _do_refresh(self):
         from ui.preview_server import _browser_opened
@@ -1766,6 +2263,14 @@ class ChartEditorPanel(QWidget):
             return
         from charts.fixed_templates import generate_preview_page
         from ui.preview_window import update_preview
+        from ui.debug_logger import log_action
+        metrics_summary = "; ".join(
+            f"{m.get('name','?')} [{m.get('type','?')}]"
+            for m in (cfg.get("metrics") or [])
+        )
+        log_action("PREVIEW", f"plugin={cfg.get('plugin_id','?')} metrics=[{metrics_summary}] "
+                   f"ou_level={((cfg.get('plugin_options') or {}).get('ou_level',''))} "
+                   f"pe={((cfg.get('time_grain') or {}).get('period',''))}")
         html = generate_preview_page(cfg, title=cfg["title"])
         update_preview(html, title=cfg.get("title", "Chart Preview"))
 
@@ -1824,9 +2329,9 @@ class ChartEditorPanel(QWidget):
             self._custom_options = deep_merge(self._custom_options, patch)
             import json
             summary = json.dumps(patch, ensure_ascii=False)
-            QTimer.singleShot(0, lambda: self._on_ai_customize_done(summary))
+            self._call_main.emit(lambda: self._on_ai_customize_done(summary))
         except Exception as exc:
-            QTimer.singleShot(0, lambda: self._on_ai_customize_done(f"Error: {exc}"))
+            self._call_main.emit(lambda e=exc: self._on_ai_customize_done(f"Error: {e}"))
 
     def _on_ai_customize_done(self, summary: str):
         lines = self._chat_display_text.rstrip("\n").split("\n")
@@ -1838,6 +2343,131 @@ class ChartEditorPanel(QWidget):
             f"✓ Applied: {summary[:120]}{'…' if len(summary) > 120 else ''}",
         )
         self._schedule_preview_refresh()
+
+    # ── AI: generate HTML from an uploaded image (Custom HTML widget) ──────────
+
+    def _load_image_for_ai(self, path: str):
+        """Read + downscale an image (≤1568px long edge) → (png_bytes, 'image/png')."""
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import QBuffer, QByteArray, Qt
+        img = QImage(path)
+        if img.isNull():
+            return None, None
+        if max(img.width(), img.height()) > 1568:
+            img = img.scaled(1568, 1568, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG")
+        buf.close()
+        return bytes(ba), "image/png"
+
+    def _on_html_from_image(self):
+        ed = self._textarea_vars.get("html")
+        if ed is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose an image to reproduce as HTML", "",
+            "Images (*.png *.jpg *.jpeg *.webp *.gif)")
+        if not path:
+            return
+        data, media = self._load_image_for_ai(path)
+        if not data:
+            QMessageBox.warning(self, "AI", "Could not read that image.")
+            return
+        # Dedup: same image already generated? Offer to reuse the saved HTML (no API call).
+        import config.html_template_library as htl
+        existing = htl.find_by_hash(htl.image_hash(data))
+        if existing:
+            box = QMessageBox(self)
+            box.setWindowTitle("Image already generated")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(f"This image was generated before — \"{existing.get('name', '')}\".\n"
+                        "Reuse the saved HTML, or regenerate via the API?")
+            reuse_btn  = box.addButton("Reuse saved", QMessageBox.ButtonRole.AcceptRole)
+            regen_btn  = box.addButton("Regenerate",  QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(reuse_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is reuse_btn:
+                ed.setPlainText(existing.get("html", ""))
+                self._schedule_preview_refresh()
+                return
+            if clicked is not regen_btn:
+                return
+            # else: fall through and regenerate
+        api_key = self._callbacks.get("get_api_key", lambda: "")()
+        if not api_key:
+            QMessageBox.warning(self, "AI", "No Anthropic API key — enter it in the sidebar.")
+            return
+        if QMessageBox.question(
+                self, "Send image to AI",
+                "The image will be sent to the Anthropic API to generate HTML. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        model = self._callbacks.get("get_model", lambda: "claude-haiku-4-5-20251001")()
+        self._html_ai_model = _short_model_name(model)   # shown on the button
+        if hasattr(self, "_html_ai_btn"):
+            self._html_ai_btn.setEnabled(False)
+            self._html_ai_btn.setText(f"⏳ Generating by {self._html_ai_model}… 0s")
+        # Live elapsed-time ticker so a 15–60s vision call doesn't look frozen.
+        self._html_ai_secs = 0
+        if not getattr(self, "_html_ai_timer", None):
+            self._html_ai_timer = QTimer(self)
+            self._html_ai_timer.setInterval(1000)
+            self._html_ai_timer.timeout.connect(self._html_ai_tick)
+        self._html_ai_timer.start()
+        cols = sorted(self._html_known_vars())
+        threading.Thread(target=self._html_from_image_worker,
+                         args=(data, media, api_key, cols, model), daemon=True).start()
+
+    def _on_open_html_gallery(self):
+        ed = self._textarea_vars.get("html")
+        if ed is None:
+            return
+        from ui.html_template_gallery import HtmlTemplateGallery
+        dlg = HtmlTemplateGallery(self)
+        dlg.exec()
+        if dlg.result_html is not None:
+            ed.setPlainText(dlg.result_html)
+            self._schedule_preview_refresh()
+
+    def _html_ai_tick(self):
+        self._html_ai_secs = getattr(self, "_html_ai_secs", 0) + 1
+        if hasattr(self, "_html_ai_btn"):
+            m = getattr(self, "_html_ai_model", "AI")
+            self._html_ai_btn.setText(f"⏳ Generating by {m}… {self._html_ai_secs}s")
+
+    def _html_from_image_worker(self, data: bytes, media: str, api_key: str, cols: list, model: str):
+        try:
+            from llm.html_from_image import generate_html_from_image
+            html = generate_html_from_image(data, media, api_key, model, columns=cols)
+            # Persist image + result so it can be reused without re-generating.
+            try:
+                import config.html_template_library as htl
+                htl.save_template(data, html, model=model)
+            except Exception:
+                pass
+            self._call_main.emit(lambda: self._on_html_from_image_done(html, None))
+        except Exception as exc:
+            self._call_main.emit(lambda e=exc: self._on_html_from_image_done(None, str(e)))
+
+    def _on_html_from_image_done(self, html, err):
+        if getattr(self, "_html_ai_timer", None):
+            self._html_ai_timer.stop()
+        if hasattr(self, "_html_ai_btn"):
+            self._html_ai_btn.setEnabled(True)
+            self._html_ai_btn.setText("🤖 Generate from image…")
+        if err:
+            QMessageBox.warning(self, "AI generate failed", err)
+            return
+        ed = self._textarea_vars.get("html")
+        if ed is not None and html:
+            ed.setPlainText(html)
+            self._schedule_preview_refresh()
 
     def _on_reset_customization(self):
         self._custom_options = {}
@@ -1877,8 +2507,8 @@ class ChartEditorPanel(QWidget):
                                deep_merge(self._quick_options, self._chart_options))
 
         # Only apply single color override when no dimension is configured.
-        dim_text = self._dimension_menu.currentText()
-        _has_dim = bool(dim_text and dim_text not in ("—", ""))
+        dimension_de = self._dim_picker.get_first_de()
+        _has_dim = dimension_de is not None
         if de.get("type") not in ("tracker_option",) and not _has_dim:
             color_base = {"datasets": [{"backgroundColor": self._selected_color,
                                          "borderColor":     self._selected_color}]}
@@ -1891,14 +2521,24 @@ class ChartEditorPanel(QWidget):
             {"uid": d["uid"], "name": d["name"], "type": d["type"], "agg": "SUM"}
             for d in sel
         ]
+        # Apply per-metric alias: render layers use `name`, so the alias becomes the
+        # displayed label / column header. `orig_name` keeps the real DE name.
+        metrics = [
+            {**m, "orig_name": m.get("orig_name", m["name"]),
+             "name": (m.get("alias") or "").strip() or m.get("orig_name", m["name"])}
+            for m in metrics
+        ]
 
-        # Resolve dimension field
-        dimension_de = None
-        if dim_text and dim_text != "—":
-            dimension_de = next(
-                (d for d in self._current_de_items if d["name"] == dim_text), None
-            )
-        group_by = [dimension_de] if dimension_de else []
+        # Dimensions: support MULTIPLE (data table) with per-item alias (like metrics).
+        # `dimension` keeps the first for back-compat (bar/pie/line read it); `group_by`
+        # carries all selected dims (and feeds _extra_params' &dimension= params).
+        dim_des = [
+            {**d, "orig_name": d.get("orig_name", d["name"]),
+             "name": (d.get("alias") or "").strip() or d.get("orig_name", d["name"])}
+            for d in self._dim_picker.get_selected_des()
+        ]
+        dimension_de = dim_des[0] if dim_des else None
+        group_by = dim_des
 
         # Collect filters
         op_map = self.__class__._OP_MAP
@@ -1908,15 +2548,16 @@ class ChartEditorPanel(QWidget):
             if de_name == "—":
                 continue
             de_obj = r["de_map"].get(de_name, {})
-            val = r["val_entry"].text().strip()
+            val = self._filter_value(r)
             if not val:
                 continue
             op_display = r["op_menu"].currentText()
             op_dhis2 = op_map.get(op_display, op_display)
             filters.append({
                 "de_uid":  de_obj.get("uid", ""),
-                "de_name": de_name,
+                "de_name": de_obj.get("name", de_name),   # store the plain name, not "(DE) …"
                 "de_type": de_obj.get("type", ""),
+                "is_tea":  de_obj.get("is_tea", False),   # PA → bare-uid dimension
                 "op":      op_dhis2,
                 "value":   val,
             })
@@ -1931,6 +2572,8 @@ class ChartEditorPanel(QWidget):
         plugin_options: dict = {}
         for k, seg in self._select_vars.items():
             plugin_options[k] = seg.get()
+        for k, ta in self._textarea_vars.items():
+            plugin_options[k] = ta.toPlainText()
         for opt_id, var in self._option_vars.items():
             if isinstance(var, QCheckBox):
                 plugin_options[opt_id] = var.isChecked()
@@ -1983,25 +2626,132 @@ class ChartEditorPanel(QWidget):
     # Actions
     # =========================================================================
 
-    def _on_save(self):
+    def _build_save_config(self) -> dict | None:
+        """Build the config for saving (with ai_desc), or None + warning if invalid."""
         cfg = self._build_config()
         if not cfg:
             QMessageBox.warning(self, "Save Chart",
                                 "Select a chart type and data element(s) first.")
-            return
+            return None
         if self._mode_ai_rb.isChecked():
             cfg["ai_desc"] = self._ai_desc.toPlainText().strip()
-        name, ok = QInputDialog.getText(
-            self, "Save Chart", "Chart name:", text=cfg["title"]
-        )
-        if not ok or not name:
+        return cfg
+
+    def _set_current_chart(self, saved: dict) -> None:
+        """Remember which saved chart is being edited and reflect it in the header."""
+        self._current_chart_id = saved.get("id")
+        self._current_chart_name = saved.get("name") or saved.get("title")
+        self._current_chart_description = saved.get("description", "")
+        self._update_chart_name_lbl()
+        self._update_action_buttons()
+
+    def _update_chart_name_lbl(self) -> None:
+        # Show the name whenever a chart is loaded — even a dashboard card (which has no
+        # library id yet). Only a truly blank editor shows "new chart".
+        if self._current_chart_name:
+            tag = "editing" if self._current_chart_id else "opened"
+            self._chart_name_lbl.setText(f"• {tag}: {self._current_chart_name}")
+        else:
+            self._chart_name_lbl.setText("• new chart")
+
+    def _on_save(self):
+        """Save: update the chart currently being edited, or save-as-new if none."""
+        cfg = self._build_save_config()
+        if cfg is None:
             return
-        cfg["name"] = name
+        if not self._current_chart_id:
+            # Nothing loaded → first save behaves like Save As (prompt for a name).
+            self._save_as_new(cfg)
+            return
+        cfg["id"] = self._current_chart_id
+        cfg["name"] = self._current_chart_name or cfg.get("title", "Chart")
+        cfg["description"] = self._current_chart_description   # keep existing description
         from config.chart_library import save_chart
         saved = save_chart(cfg)
+        self._set_current_chart(saved)
+        if self._my_charts_visible:
+            self._refresh_my_charts()
         cb = self._callbacks.get("on_chart_saved")
         if cb:
             cb(saved)
+        QMessageBox.information(self, "Save Chart", f"Updated '{saved['name']}'.")
+
+    def _on_save_as(self):
+        """Save As: always create a NEW saved chart under a chosen name."""
+        cfg = self._build_save_config()
+        if cfg is None:
+            return
+        self._save_as_new(cfg)
+
+    def _save_as_new(self, cfg: dict):
+        from ui.save_entity_dialog import SaveEntityDialog
+        res = SaveEntityDialog.prompt(
+            self, title="Save Chart",
+            name=self._current_chart_name or cfg.get("title", "Chart"),
+            description=self._current_chart_description,
+        )
+        if not res:
+            return
+        name, description = res
+        cfg.pop("id", None)            # force a brand-new entity
+        cfg.pop("created_at", None)
+        cfg["name"] = name
+        cfg["description"] = description
+        from config.chart_library import save_chart
+        saved = save_chart(cfg)
+        self._set_current_chart(saved)
+        if self._my_charts_visible:
+            self._refresh_my_charts()
+        cb = self._callbacks.get("on_chart_saved")
+        if cb:
+            cb(saved)
+
+    def _on_open_chart(self):
+        """Open a saved chart back into the editor (parallels dashboard Load)."""
+        from config.chart_library import load_charts
+        from ui.load_chart_dialog import LoadChartDialog
+        charts = load_charts()
+        if not charts:
+            QMessageBox.information(self, "Open Chart",
+                                    "No saved charts yet.\nSave a chart first.")
+            return
+        dlg = LoadChartDialog(self, charts)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            selected = dlg.get_selected()
+            if selected:
+                self._load_chart_config(selected)
+
+    def _on_new(self):
+        """Start a fresh chart: detach from any saved entity and clear the editor."""
+        if self._selected_metrics or self._title_entry.text().strip():
+            if QMessageBox.question(
+                self, "New Chart",
+                "Discard the current chart and start a new one?",
+            ) != QMessageBox.StandardButton.Yes:
+                return
+        self._current_chart_id = None
+        self._current_chart_name = None
+        self._current_chart_description = ""
+        self._reset_editor_fields()
+        self._update_chart_name_lbl()
+        self._update_action_buttons()
+
+    def _reset_editor_fields(self):
+        """Clear the user-entered content (title, metrics, filters, AI customizations)."""
+        self._title_entry.clear()
+        for rd in list(self._filter_rows):
+            self._remove_filter_row(rd)
+        try:
+            self._metrics_picker.set_selected_uids([], {})
+        except Exception:
+            pass
+        self._selected_metrics = []
+        self._custom_options = {}
+        self._chat_display_text = ""
+        self._chat_display.setReadOnly(False)
+        self._chat_display.setPlainText("")
+        self._chat_display.setReadOnly(True)
+        self._on_de_check()
 
     def _on_add_to_dashboard(self):
         cfg = self._build_config()

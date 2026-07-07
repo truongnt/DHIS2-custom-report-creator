@@ -172,7 +172,8 @@ def fetch_program_stage_data_elements(client: DHIS2Client,
             "id,displayName,"
             "programStages[id,displayName,"
             "programStageDataElements["
-            "dataElement[id,displayName,valueType]"
+            "dataElement[id,displayName,valueType,"
+            "optionSet[id,options[id,code,displayName]]]"
             "]]"
         ),
         "paging": "false",
@@ -194,6 +195,7 @@ def fetch_program_stage_data_elements(client: DHIS2Client,
                         "id":          uid,
                         "displayName": de.get("displayName", ""),
                         "valueType":   de.get("valueType", ""),
+                        "optionSet":   de.get("optionSet"),
                         "program":     {"displayName": prog_name, "id": prog.get("id", "")},
                         "stage":       {"displayName": stage_name, "id": stage.get("id", "")},
                     })
@@ -222,11 +224,14 @@ def fetch_tracked_entity_attributes(client: DHIS2Client,
             "paging": "false",
         }
         data = client.get("programs.json", params=params)
-        seen: set[str] = set()
         result: list[dict] = []
         for prog in data.get("programs", []):
             prog_name = prog.get("displayName", "")
             prog_id   = prog.get("id", "")
+            # Dedup PER PROGRAM (not globally): a PA shared by several programs
+            # must appear under EACH program, or it goes missing when the user
+            # selects a program other than the first one that declared it.
+            seen: set[str] = set()
             for ptea in prog.get("programTrackedEntityAttributes", []):
                 tea = ptea.get("trackedEntityAttribute", {})
                 uid = tea.get("id")

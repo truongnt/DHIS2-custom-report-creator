@@ -16,12 +16,36 @@ Usage example in a plugin:
         \"\"\"
 """
 
-# ── Palette ───────────────────────────────────────────────────────────────────
+# ── Palettes ──────────────────────────────────────────────────────────────────
+# Categorical schemes tuned so ADJACENT entries are easy to tell apart (no two
+# near-identical blues/oranges next to each other). Default = Tableau 10; the themed
+# schemes vary hue AND lightness so series stay distinguishable. Shared by every
+# plugin via `from charts.plugins.shared_js import PALETTES`.
+PALETTES: dict[str, list[str]] = {
+    # Tableau 10 — the go-to distinct qualitative set.
+    "Default": ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
+                "#edc948", "#b07aa1", "#ff9da7"],
+    # Material palette with the DHIS2 blue leading; well-separated hues.
+    "DHIS2":   ["#1a9edb", "#ff5722", "#4caf50", "#ffc107", "#9c27b0",
+                "#00acc1", "#e91e63", "#795548"],
+    # Warm: yellows→oranges→reds→browns, alternating light/dark to stay readable.
+    "Warm":    ["#fee08b", "#f46d43", "#a50026", "#fdae61", "#d73027",
+                "#7f3b08", "#fdbf6f", "#b2182b"],
+    # Cool: blues/greens/purples, alternating light/dark.
+    "Cool":    ["#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#6a3d9a",
+                "#cab2d6", "#08519c", "#41b6c4"],
+    # Earth: brown ↔ teal alternation (BrBG) for strong adjacent contrast.
+    "Earth":   ["#8c510a", "#35978f", "#bf812d", "#01665e", "#dfc27d",
+                "#003c30", "#543005", "#80cdc1"],
+    # Pastel: ColorBrewer Set3 — soft but distinct hues.
+    "Pastel":  ["#8dd3c7", "#fb8072", "#bebada", "#fdb462", "#b3de69",
+                "#bc80bd", "#80b1d3", "#fccde5"],
+}
 
-PALETTE_JS: str = (
-    "const PALETTE=['#e74c3c','#3498db','#f39c12','#27ae60','#9b59b6',"
-    "'#1abc9c','#e67e22','#2980b9','#8e44ad','#16a085'];"
-)
+# Default sample palette (10 colours) for plugins that embed PALETTE_JS directly.
+import json as _json
+PALETTE_JS: str = "const PALETTE=" + _json.dumps(
+    PALETTES["Default"] + ["#9c755f", "#bab0ac"]) + ";"
 
 # ── Demo / sample data blobs ──────────────────────────────────────────────────
 # These are used by renderChart{n}Sample() functions so plugins can show
@@ -180,7 +204,29 @@ SHARED_SCRIPT: str = """\
       var fontSize = opts.fontSize || 11;
       var color = opts.color || '#333';
       var type = chart.config.type;
-      if (type === 'pie' || type === 'doughnut') return;
+      if (type === 'pie' || type === 'doughnut') {
+        var ds0 = chart.data.datasets[0] || {data:[]};
+        var meta0 = chart.getDatasetMeta(0);
+        var total = (ds0.data||[]).reduce(function(s,x){return s+(parseFloat(x)||0);},0);
+        var mode = opts.mode || 'value';          // 'value' | 'percent'
+        var outside = opts.pos === 'outside';
+        (meta0.data||[]).forEach(function(arc, idx){
+          var v = ds0.data[idx];
+          if (v === null || v === undefined || v === 0) return;
+          var txt = (mode === 'percent') ? (total ? (v/total*100).toFixed(1)+'%' : '0%')
+                    : ((typeof v === 'number') ? v.toLocaleString() : String(v));
+          var ang = (arc.startAngle + arc.endAngle) / 2;
+          var rr = outside ? (arc.outerRadius + 14)
+                           : (arc.innerRadius + (arc.outerRadius - arc.innerRadius) * 0.6);
+          ctx.save();
+          ctx.font = 'bold ' + fontSize + 'px sans-serif';
+          ctx.fillStyle = outside ? (opts.color || '#333') : (opts.color || '#fff');
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(txt, arc.x + Math.cos(ang)*rr, arc.y + Math.sin(ang)*rr);
+          ctx.restore();
+        });
+        return;
+      }
       chart.data.datasets.forEach(function(dataset, i) {
         var meta = chart.getDatasetMeta(i);
         if (!meta.visible) return;
@@ -264,6 +310,8 @@ SHARED_SCRIPT: str = """\
   }
 
   function formatPeriodLabel(pe) {
+    if (pe == null) return '';
+    pe = String(pe);
     const mm=pe.match(/^(\\d{4})(\\d{2})$/);
     if(mm){const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return M[parseInt(mm[2],10)-1]+' '+mm[1];}
     const qm=pe.match(/^(\\d{4})Q(\\d)$/);

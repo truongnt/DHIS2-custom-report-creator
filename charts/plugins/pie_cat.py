@@ -10,6 +10,8 @@ color_scheme : Default | DHIS2 | Warm | Cool | Earth | Pastel
 chart_type   : Pie | Donut
 show_legend  : Off | Bottom | Top | Right
 show_values  : Off | Percent | Value
+label_pos    : Inside | Outside   (where value labels sit relative to the slice)
+show_empty   : Hide | Show        (Hide drops zero-value categories from slices + legend)
 """
 from __future__ import annotations
 
@@ -24,18 +26,17 @@ from charts.plugins.base import (
 
 # ── Palettes ──────────────────────────────────────────────────────────────────
 
-_PALETTES: dict[str, list[str]] = {
-    "Default": ["#e74c3c","#3498db","#f39c12","#27ae60","#9b59b6","#1abc9c","#e67e22","#2980b9"],
-    "DHIS2":   ["#147cd7","#00b5ae","#ff5722","#8bc34a","#e91e63","#ff9800","#9c27b0","#2196f3"],
-    "Warm":    ["#f39c12","#e74c3c","#e67e22","#d35400","#c0392b","#a04000","#f1c40f","#ca6f1e"],
-    "Cool":    ["#2980b9","#3498db","#1abc9c","#16a085","#5dade2","#48c9b0","#76d7c4","#85c1e9"],
-    "Earth":   ["#6e2f21","#935116","#7d6608","#1e8449","#4a235a","#117a65","#b9770e","#17202a"],
-    "Pastel":  ["#f1948a","#7fb3d3","#f8c471","#82e0aa","#c39bd3","#73c6b6","#f0b27a","#abebc6"],
-}
+# Distinct-adjacent categorical palettes, shared across all chart plugins.
+from charts.plugins.shared_js import PALETTES as _PALETTES
 
 
 def _po(po: dict, key: str, default):
     return po.get(key, default) if po else default
+
+
+def _metric_name(m: dict) -> str:
+    """Legend/slice label for a metric: the user's alias if set, else the real name/uid."""
+    return (m.get("alias") or "").strip() or m.get("name") or m.get("uid", "")
 
 
 def _jsbool(v) -> str:
@@ -51,32 +52,30 @@ def _chartjs_options(po: dict) -> str:
     legend_raw  = _po(po, "show_legend", "Bottom")
     show_legend = legend_raw != "Off"
     legend_pos  = legend_raw.lower() if show_legend else "bottom"
-    show_values = _po(po, "show_values", "Off")   # "Off" | "Percent" | "Value"
-    chart_type  = _po(po, "chart_type",  "Pie")   # "Pie" | "Donut"
+    show_values = _po(po, "show_values", "Off")    # "Off" | "Percent" | "Value"
+    label_pos   = _po(po, "label_pos",   "Inside") # "Inside" | "Outside"
+    chart_type  = _po(po, "chart_type",  "Pie")    # "Pie" | "Donut"
     cutout      = "50%" if chart_type == "Donut" else "0%"
 
-    if show_values == "Percent":
-        dl_display   = "true"
-        dl_formatter = "(v, ctx) => { const total = ctx.chart.data.datasets[0].data.reduce((s,x)=>s+x,0); return total ? (v/total*100).toFixed(1)+'%' : '0%'; }"
-    elif show_values == "Value":
-        dl_display   = "true"
-        dl_formatter = "v => v.toLocaleString()"
-    else:
-        dl_display   = "false"
-        dl_formatter = "v => v"
+    # Value labels are drawn by the registered `showValues` plugin (datalabels is not
+    # registered — see shared script). mode = percent|value; pos = inside|outside.
+    sv_display = "true" if show_values in ("Percent", "Value") else "false"
+    sv_mode    = "percent" if show_values == "Percent" else "value"
+    outside    = label_pos == "Outside"
+    sv_pos     = "outside" if outside else "inside"
+    sv_color   = "#333" if outside else "#fff"
+    layout_pad = "28" if outside else "0"   # room so outside labels aren't clipped
 
     return f"""{{
         responsive: true,
         maintainAspectRatio: false,
         cutout: '{cutout}',
+        layout: {{ padding: {layout_pad} }},
         plugins: {{
           legend: {{ display: {_jsbool(show_legend)}, position: '{legend_pos}' }},
-          datalabels: {{
-            display: {dl_display},
-            formatter: {dl_formatter},
-            font: {{ size: 11, weight: 'bold' }},
-            color: '#fff',
-          }},
+          datalabels: {{ display: false }},
+          showValues: {{ display: {sv_display}, mode: '{sv_mode}', pos: '{sv_pos}',
+                         color: '{sv_color}', fontSize: 12 }},
           tooltip: {{
             callbacks: {{
               label: ctx => {{
@@ -90,9 +89,16 @@ def _chartjs_options(po: dict) -> str:
       }}"""
 
 
-def _sample_js(n: int, po: dict, color_scheme: str = "Default") -> str:
+def _sample_js(n: int, po: dict, color_scheme: str = "Default", labels=None) -> str:
     chart_opts = _chartjs_options(po)
     pal        = _palette_js(color_scheme)
+    # Label the demo slices with the selected metric/category names so the preview is
+    # representative (indicators have no fixture, so this sample is what the user sees).
+    _lbls = [s for s in (labels or []) if s] or ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
+    _lbls = _lbls[:8]
+    _demo = [35, 25, 20, 12, 8, 6, 4, 3][:len(_lbls)]
+    labels_js = _json.dumps(_lbls)
+    data_js   = _json.dumps(_demo)
     return f"""\
         let chart{n}Inst = null;
         function renderChart{n}Sample(cvs) {{
@@ -101,10 +107,10 @@ def _sample_js(n: int, po: dict, color_scheme: str = "Default") -> str:
           chart{n}Inst = new Chart(cvs.getContext('2d'), {{
             type: 'pie',
             data: {{
-              labels: ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'],
+              labels: {labels_js},
               datasets: [{{
-                data: [35, 25, 20, 12, 8],
-                backgroundColor: [PALETTE[0],PALETTE[1],PALETTE[2],PALETTE[3],PALETTE[4]]
+                data: {data_js},
+                backgroundColor: {labels_js}.map((_,i)=>PALETTE[i%PALETTE.length])
               }}]
             }},
             options: {chart_opts}
@@ -119,6 +125,8 @@ def _real_js(n: int, de_uid: str, prog_uid: str, stg_uid: str,
     sort_limit  = ChartPlugin._sort_limit_js(config, "combined")
     chart_opts  = _chartjs_options(po)
     pal         = _palette_js(color_scheme)
+    # Hide categories with no value so empty slices don't clutter the pie or its legend.
+    hide_empty_js = _jsbool(_po(po, "show_empty", "Hide") == "Hide")
 
     return f"""\
         function renderChart{n}Real(cvs, d) {{
@@ -145,7 +153,13 @@ def _real_js(n: int, de_uid: str, prog_uid: str, stg_uid: str,
           const labels = catCodes.map(nameOf);
           const vals   = catCodes.map(c => totals[c] || 0);
           let combined = labels.map((l, i) => ({{l, v: vals[i]}}));
+          if ({hide_empty_js}) combined = combined.filter(x => x.v > 0);
           {sort_limit}
+          if (!combined.length) {{
+            const errEl = document.getElementById('error{n}');
+            errEl.textContent = 'No non-zero values to plot.'; errEl.style.display = 'block';
+            return;
+          }}
           const sortedLabels = combined.map(x => x.l);
           const sortedVals   = combined.map(x => x.v);
           chart{n}Inst = new Chart(cvs.getContext('2d'), {{
@@ -190,6 +204,72 @@ def _real_js(n: int, de_uid: str, prog_uid: str, stg_uid: str,
         }}"""
 
 
+def _real_js_metrics(n: int, metrics: list, config: dict, po: dict, color_scheme: str) -> str:
+    """Pie of MULTIPLE dx metrics (indicators / aggregates): one slice per metric, labelled
+    by the metric's alias/name. Queried as dx via analytics.json (period + OU as filters)."""
+    uids   = [m["uid"] for m in metrics]
+    labels = [_metric_name(m) for m in metrics]
+    dx     = ";".join(uids)
+    uids_js   = _json.dumps(uids)
+    labels_js = _json.dumps(labels)
+    chart_opts = _chartjs_options(po)
+    pal        = _palette_js(color_scheme)
+    hide_empty_js = _jsbool(_po(po, "show_empty", "Hide") == "Hide")
+    filt = ChartPlugin._filter_params(config)
+    filt = ("&" + filt) if filt else ""
+    return f"""\
+        function renderChart{n}Real(cvs, d) {{
+          if (chart{n}Inst) {{ chart{n}Inst.destroy(); chart{n}Inst = null; }}
+          {pal}
+          const UIDS = {uids_js}, LABELS = {labels_js};
+          const dxIdx  = d.headers.findIndex(h => h.name === 'dx');
+          const valIdx = d.headers.findIndex(h => h.name === 'value');
+          const byDx = {{}};
+          (d.rows||[]).forEach(r => {{ byDx[r[dxIdx]] = (byDx[r[dxIdx]]||0) + (parseFloat(r[valIdx])||0); }});
+          let combined = UIDS.map((u,i) => ({{l: LABELS[i], v: byDx[u]||0}}));
+          if ({hide_empty_js}) combined = combined.filter(x => x.v > 0);
+          if (!combined.length) {{
+            const errEl = document.getElementById('error{n}');
+            errEl.textContent = 'No non-zero values to plot.'; errEl.style.display = 'block'; return;
+          }}
+          chart{n}Inst = new Chart(cvs.getContext('2d'), {{
+            type: 'pie',
+            data: {{
+              labels: combined.map(x => x.l),
+              datasets: [{{ data: combined.map(x => x.v),
+                            backgroundColor: combined.map((_,i)=>PALETTE[i%PALETTE.length]) }}]
+            }},
+            options: {chart_opts}
+          }});
+        }}
+
+        async function initChart{n}(ou, pe) {{
+          document.getElementById('loading{n}').style.display='none';
+          const cvs=document.getElementById('chart{n}');
+          cvs.style.display='block';
+          if (PREVIEW) {{
+            const b=document.getElementById('demoBanner{n}');
+            if(b) b.style.display='block';
+            renderChart{n}Sample(cvs); return;
+          }}
+          document.getElementById('demoBanner{n}').style.display='none';
+          const errEl=document.getElementById('error{n}');
+          errEl.style.display='none';
+          try {{
+            const d = await dhis2Get(
+              'api/analytics.json?dimension=dx:{dx}'
+              +'&filter=ou:'+encodeURIComponent(ou)
+              +'&filter=pe:'+encodeURIComponent(pe)
+              +'&displayProperty=NAME{filt}'
+            );
+            if (!d.rows||!d.rows.length){{errEl.textContent='No data.';errEl.style.display='block';return;}}
+            renderChart{n}Real(cvs, d);
+          }} catch(e) {{
+            console.error('[Chart{n}]',e);errEl.textContent='Failed: '+e.message;errEl.style.display='block';
+          }}
+        }}"""
+
+
 # ── Plugin class ───────────────────────────────────────────────────────────────
 
 class PieCatPlugin(ChartPlugin):
@@ -202,8 +282,8 @@ class PieCatPlugin(ChartPlugin):
     metrics = [
         MetricControl(
             id="metric",
-            label="Value (optional — leave empty for event count)",
-            max_count=1,
+            label="Values (indicators → one slice each) or leave for event count",
+            max_count=10,
             allowed_types=("tracker_numeric", "aggregate", "indicator"),
             default_agg="SUM",
             show_agg_picker=True,
@@ -215,8 +295,8 @@ class PieCatPlugin(ChartPlugin):
             id="dimension",
             label="Split by (pie slices)",
             allowed_types=("tracker_option", "tracker_numeric", "aggregate", "indicator"),
-            required=True,
-            hint="Option-set DE: each option value becomes one pie slice",
+            required=False,
+            hint="Option-set DE: one slice per option value. (Or pick multiple indicators above.)",
         )
     ]
     options = [
@@ -224,6 +304,8 @@ class PieCatPlugin(ChartPlugin):
         SelectControl("chart_type",   "Chart type",   ("Pie", "Donut"),                                        "Pie"),
         SelectControl("show_legend",  "Legend",       ("Off", "Bottom", "Top", "Right"),                       "Bottom"),
         SelectControl("show_values",  "Labels",       ("Off", "Percent", "Value"),                             "Off"),
+        SelectControl("label_pos",    "Label position", ("Inside", "Outside"),                                 "Inside"),
+        SelectControl("show_empty",   "Empty slices", ("Hide", "Show"),                                        "Hide"),
     ]
     time_grain = None
 
@@ -234,6 +316,17 @@ class PieCatPlugin(ChartPlugin):
         dim_de  = dims.get("dimension")
         source  = config.get("source") or {}
         color_scheme = _po(po, "color_scheme", "Default")
+
+        # Multi-metric pie: multiple dx metrics (indicators/aggregates) → one slice each,
+        # legend = each metric's alias. Used when there's no option-set split dimension.
+        dim_is_opt = bool(dim_de and dim_de.get("uid") and dim_de.get("type") == "tracker_option")
+        dx_metrics = [m for m in (config.get("metrics") or [])
+                      if m.get("uid") and m.get("type") in ("aggregate", "indicator")]
+        if not dim_is_opt and dx_metrics:
+            sample = _sample_js(n, po, color_scheme,
+                                labels=[_metric_name(m) for m in dx_metrics])
+            real   = _real_js_metrics(n, dx_metrics, config, po, color_scheme)
+            return sample + "\n" + real
 
         if dim_de and dim_de.get("uid"):
             de_uid   = dim_de["uid"]
@@ -248,6 +341,7 @@ class PieCatPlugin(ChartPlugin):
 
         options = dim_de.get("options", []) if dim_de else []
 
-        sample = _sample_js(n, po, color_scheme)
+        sample = _sample_js(n, po, color_scheme,
+                            labels=[o.get("name") for o in options if o.get("name")])
         real   = _real_js(n, de_uid, prog_uid, stg_uid, config, options, po, color_scheme)
         return sample + "\n" + real
